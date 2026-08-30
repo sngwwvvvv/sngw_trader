@@ -19,11 +19,7 @@ from nautilus_trader.model.enums import AccountType, BookType, OmsType
 
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
-from sngw_trader.runners.strategy_factory import build_ema_cross
-
-
-def default_bar_type(instrument_id: str) -> str:
-    return f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+from sngw_trader.runners.strategy_factory import build_strategy
 
 
 def build_fill_model_config(settings: Settings) -> ImportableFillModelConfig:
@@ -86,12 +82,8 @@ def build_run_config(catalog_path: str, instrument_id: str, settings: Settings) 
     )
 
 
-def attach_strategy(node: BacktestNode, run_id: object, instrument_id: str) -> None:
-    strategy = build_ema_cross(
-        instrument_id=instrument_id,
-        bar_type=default_bar_type(instrument_id),
-        trade_size="0.01",
-    )
+def attach_strategy(node: BacktestNode, run_id: object, settings: Settings) -> None:
+    strategy = build_strategy(settings)
     if hasattr(node, "add_strategy"):
         try:
             node.add_strategy(strategy)
@@ -115,7 +107,7 @@ def main() -> None:
     )
     node = BacktestNode(configs=[run_config])
     node.build()
-    attach_strategy(node, run_config.id, settings.instrument_id_str)
+    attach_strategy(node, run_config.id, settings)
 
     try:
         results = node.run()

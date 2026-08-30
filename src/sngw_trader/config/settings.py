@@ -35,6 +35,21 @@ class Settings:
     bt_latency_ms: int
     bt_prob_fill_on_limit: float
     bt_prob_slippage: float
+    strategy: str
+    w_f: int
+    w_e: int
+    momentum_window: int
+    theta: float
+    ema_fast: int
+    ema_slow: int
+    n_pull: int
+    trade_size: str
+    risk_stop_enabled: bool
+    atr_period: int
+    atr_mult: float
+    vol_filter_enabled: bool
+    vol_lookback: int
+    vol_threshold: float
 
     @property
     def is_demo(self) -> bool:
@@ -75,4 +90,19 @@ def load_settings() -> Settings:
         bt_latency_ms=int(_env("BT_LATENCY_MS", "200")),
         bt_prob_fill_on_limit=float(_env("BT_PROB_FILL_ON_LIMIT", "0.7")),
         bt_prob_slippage=float(_env("BT_PROB_SLIPPAGE", "0.1")),
+        strategy=_env("STRATEGY", "err_mom_a"),
+        w_f=int(_env("ERMOM_WF", "10")),
+        w_e=int(_env("ERMOM_WE", "10")),
+        momentum_window=int(_env("ERMOM_L", "200")),
+        theta=float(_env("ERMOM_THETA", "0")),
+        ema_fast=int(_env("EMA_FAST", "20")),
+        ema_slow=int(_env("EMA_SLOW", "50")),
+        n_pull=int(_env("N_PULL", "24")),
+        trade_size=_env("TRADE_SIZE", "0.01"),
+        risk_stop_enabled=_env("RISK_STOP_ENABLED", "true").lower() in {"1", "true", "yes"},
+        atr_period=int(_env("ATR_PERIOD", "14")),
+        atr_mult=float(_env("ATR_MULT", "3")),
+        vol_filter_enabled=_env("VOL_FILTER_ENABLED", "true").lower() in {"1", "true", "yes"},
+        vol_lookback=int(_env("VOL_LOOKBACK", "20")),
+        vol_threshold=float(_env("VOL_THRESHOLD", "0.80")),
     )
