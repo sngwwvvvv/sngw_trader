@@ -128,7 +128,7 @@ class ErrMomEma30Entry(Strategy):
         self._ema_slow = Ema(config.ema_slow)
         self._long = RibbonEntryMachine(1, config.n_pull)
         self._short = RibbonEntryMachine(-1, config.n_pull)
-        self._stop: float | None = None
+        self._stop_price: float | None = None
         self._pending_atr: float | None = None
         self._active_direction = 0
 
@@ -169,15 +169,15 @@ class ErrMomEma30Entry(Strategy):
         ema_s = self._ema_slow.update(bar30.close)
         regime = regime_target(self._ermom.value, self.config.theta)
 
-        if not self.portfolio.is_net_flat(self.config.instrument_id):
+        if not self.portfolio.is_flat(self.config.instrument_id):
             side = 1 if self.portfolio.is_net_long(self.config.instrument_id) else -1
-            if self.config.risk_stop_enabled and is_stop_hit(side, bar30.close, self._stop):
+            if self.config.risk_stop_enabled and is_stop_hit(side, bar30.close, self._stop_price):
                 self.close_all_positions(self.config.instrument_id)
-                self._stop = None
+                self._stop_price = None
                 return
             if ema_f is not None and ema_s is not None and should_exit(side, regime, bar30.close, ema_f, ema_s):
                 self.close_all_positions(self.config.instrument_id)
-                self._stop = None
+                self._stop_price = None
                 self._long.reset()
                 self._short.reset()
             return
@@ -216,10 +216,10 @@ class ErrMomEma30Entry(Strategy):
     def on_event(self, event) -> None:
         if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
             return
-        if self.portfolio.is_net_flat(self.config.instrument_id):
-            self._stop = None
+        if self.portfolio.is_flat(self.config.instrument_id):
+            self._stop_price = None
             return
         if self._pending_atr is not None:
             side = 1 if self.portfolio.is_net_long(self.config.instrument_id) else -1
-            self._stop = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
+            self._stop_price = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
             self._pending_atr = None

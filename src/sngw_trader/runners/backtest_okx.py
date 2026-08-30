@@ -18,7 +18,7 @@ from nautilus_trader.config import (
     LatencyModelConfig,
 )
 from nautilus_trader.model import Bar
-from nautilus_trader.model.enums import AccountType, BookType, OmsType
+from nautilus_trader.model.enums import AccountType, OmsType
 
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
@@ -79,7 +79,7 @@ def build_run_config(
         name="OKX",
         oms_type=OmsType.NETTING,
         account_type=AccountType.MARGIN,
-        book_type=BookType.L1_MBP,
+        book_type="L1_MBP",
         starting_balances=["10_000 USDT"],
         fill_model=build_fill_model_config(settings),
         fee_model=build_fee_model_config(settings),

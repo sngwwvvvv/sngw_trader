@@ -58,7 +58,7 @@ class ErrMomentumRegime(Strategy):
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
         self._vol = RealizedVol(config.vol_lookback)
-        self._stop: float | None = None
+        self._stop_price: float | None = None
         self._pending_atr: float | None = None
 
     def on_start(self) -> None:
@@ -88,9 +88,9 @@ class ErrMomentumRegime(Strategy):
             return
         side = self._current_side()
         if side == 0:
-            self._stop = None
+            self._stop_price = None
         elif self._pending_atr is not None:
-            self._stop = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
+            self._stop_price = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
             self._pending_atr = None
 
     def _current_side(self) -> int:
@@ -101,9 +101,9 @@ class ErrMomentumRegime(Strategy):
         return 0
 
     def _check_stop(self, price: float) -> bool:
-        if self.config.risk_stop_enabled and is_stop_hit(self._current_side(), price, self._stop):
+        if self.config.risk_stop_enabled and is_stop_hit(self._current_side(), price, self._stop_price):
             self.close_all_positions(self.config.instrument_id)
-            self._stop = None
+            self._stop_price = None
             return True
         return False
 
@@ -121,7 +121,7 @@ class ErrMomentumRegime(Strategy):
             return
         if current != 0:
             self.close_all_positions(self.config.instrument_id)
-            self._stop = None
+            self._stop_price = None
         if target != 0:
             self._submit(OrderSide.BUY if target > 0 else OrderSide.SELL)
 

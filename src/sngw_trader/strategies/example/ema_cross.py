@@ -43,14 +43,14 @@ class EMACross(Strategy):
         bullish = self.fast_ema.value >= self.slow_ema.value
 
         if bullish:
-            if self.portfolio.is_net_flat(instrument_id):
+            if self.portfolio.is_flat(instrument_id):
                 self._enter(OrderSide.BUY)
             elif self.portfolio.is_net_short(instrument_id):
                 self.close_all_positions(instrument_id)
                 self._enter(OrderSide.BUY)
             return
 
-        if self.portfolio.is_net_flat(instrument_id):
+        if self.portfolio.is_flat(instrument_id):
             self._enter(OrderSide.SELL)
         elif self.portfolio.is_net_long(instrument_id):
             self.close_all_positions(instrument_id)

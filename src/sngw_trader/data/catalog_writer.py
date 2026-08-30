@@ -63,16 +63,21 @@ def write_placeholder_note(catalog_path: Path) -> Path:
     return note
 
 
-def _okx_http_client():
+def _okx_http_client(settings: Settings):
     from nautilus_trader.adapters.okx.factories import get_cached_okx_http_client
-    return get_cached_okx_http_client()
+    from nautilus_trader.core.nautilus_pyo3.okx import OKXEnvironment
+
+    env = OKXEnvironment.DEMO if settings.is_demo else OKXEnvironment.LIVE
+    return get_cached_okx_http_client(
+        api_key="", api_secret="", api_passphrase="", environment=env
+    )
 
 
 def load_instrument(settings: Settings) -> Instrument:
     from nautilus_trader.adapters.okx import OKXInstrumentProvider
     from nautilus_trader.core.nautilus_pyo3.okx import OKXInstrumentType
 
-    client = _okx_http_client()
+    client = _okx_http_client(settings)
     provider = OKXInstrumentProvider(
         client,
         instrument_types=(OKXInstrumentType.SWAP,),
@@ -82,7 +87,7 @@ def load_instrument(settings: Settings) -> Instrument:
     return instruments[InstrumentId.from_str(settings.instrument_id_str)]
 
 
-def _fetch_candles(symbol: str, after_ms: int | None, limit: int = 100) -> list[list[str]]:
+def _fetch_candles(symbol: str, after_ms: int | None, limit: int = 300) -> list[list[str]]:
     params = {"instId": symbol, "bar": "1m", "limit": str(limit)}
     if after_ms is not None:
         params["after"] = str(after_ms)
@@ -133,7 +138,7 @@ def download_bars(
                 )
             )
         oldest = int(rows[-1][0])
-        if oldest < start_ms or len(rows) < 100:
+        if oldest < start_ms or len(rows) < 300:
             break
         time.sleep(0.1)  # OKX rate limit guard; public candles, no auth
     bars.sort(key=lambda b: b.ts_init)  # catalog requires ascending ts_init
