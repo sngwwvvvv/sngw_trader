@@ -95,11 +95,24 @@ def _fetch_candles(symbol: str, after_ms: int | None, limit: int = 100) -> list[
     return payload["data"]
 
 
-def download_bars(settings: Settings) -> list[Bar]:
-    instrument = load_instrument(settings)
+def _validate_range(settings: Settings) -> None:
+    start, end = settings.catalog_start, settings.catalog_end
+    if start is None or end is None:
+        raise SystemExit("CATALOG_START and CATALOG_END are required for catalog download")
+    if end <= start:
+        raise SystemExit(f"CATALOG_END ({end}) must be after CATALOG_START ({start})")
+
+
+def download_bars(
+    settings: Settings,
+    instrument: Instrument | None = None,
+) -> list[Bar]:
+    _validate_range(settings)
+    if instrument is None:
+        instrument = load_instrument(settings)
     symbol = settings.symbol.upper().replace(".OKX", "")
-    start_ms = int(settings.catalog_start.replace(tzinfo=timezone.utc).timestamp() * 1000)
-    end_ms = int(settings.catalog_end.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    start_ms = int(settings.catalog_start.astimezone(timezone.utc).timestamp() * 1000)
+    end_ms = int(settings.catalog_end.astimezone(timezone.utc).timestamp() * 1000)
 
     bars: list[Bar] = []
     oldest = None
@@ -135,7 +148,7 @@ def main() -> None:
     instrument = load_instrument(settings)
     catalog.write_data([instrument], data_cls=Instrument)
 
-    bars = download_bars(settings)
+    bars = download_bars(settings, instrument)
     if not bars:
         raise SystemExit("No candles downloaded for the requested range")
     catalog.write_data(bars, data_cls=Bar)

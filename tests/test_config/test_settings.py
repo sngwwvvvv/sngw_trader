@@ -78,10 +78,30 @@ def test_load_settings_parses_catalog_range(monkeypatch) -> None:
     assert s.catalog_end == datetime(2026, 3, 1)
 
 
-def test_load_settings_requires_catalog_start(monkeypatch) -> None:
-    for k, v in _base_env().items():
-        monkeypatch.setenv(k, v)
-    monkeypatch.delenv("CATALOG_START")
+def test_load_settings_without_catalog_range_succeeds(monkeypatch) -> None:
+    monkeypatch.setenv("OKX_ENV", "demo")
+    s = load_settings()
+    assert s.catalog_start is None
+    assert s.catalog_end is None
+
+
+def test_load_settings_rejects_malformed_catalog_start(monkeypatch) -> None:
+    monkeypatch.setenv("OKX_ENV", "demo")
+    monkeypatch.setenv("CATALOG_START", "not-a-date")
     import pytest
     with pytest.raises(SystemExit):
         load_settings()
+
+
+def test_download_bars_rejects_inverted_range(monkeypatch) -> None:
+    import pytest
+
+    from sngw_trader.data.catalog_writer import _validate_range
+
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CATALOG_START", "2026-03-01")
+    monkeypatch.setenv("CATALOG_END", "2026-01-01")
+    s = load_settings()
+    with pytest.raises(SystemExit):
+        _validate_range(s)

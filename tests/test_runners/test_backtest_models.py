@@ -34,9 +34,7 @@ def test_fee_model_taker_and_maker() -> None:
     assert maker.as_double() == 10 * 100.0 * 0.0002
 
 
-def test_run_config_has_fill_fee_latency(monkeypatch) -> None:
-    monkeypatch.setenv("CATALOG_START", "2026-01-01")
-    monkeypatch.setenv("CATALOG_END", "2026-03-01")
+def test_run_config_has_fill_fee_latency() -> None:
     settings = load_settings()
     run_config = build_run_config(str(settings.catalog_path), settings.instrument_id_str, settings)
     venue = run_config.venues[0]

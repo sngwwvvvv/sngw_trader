@@ -15,10 +15,10 @@ def _env(name: str, default: str = "") -> str:
     return value.strip()
 
 
-def _required_ts(name: str) -> datetime:
+def _optional_ts(name: str) -> datetime | None:
     raw = _env(name)
     if not raw:
-        raise SystemExit(f"{name} is required for catalog download")
+        return None
     try:
         return datetime.fromisoformat(raw)
     except ValueError:
@@ -46,8 +46,8 @@ class Settings:
     bt_latency_ms: int
     bt_prob_fill_on_limit: float
     bt_prob_slippage: float
-    catalog_start: datetime
-    catalog_end: datetime
+    catalog_start: datetime | None
+    catalog_end: datetime | None
 
     @property
     def is_demo(self) -> bool:
@@ -67,10 +67,6 @@ class Settings:
 
 def load_settings() -> Settings:
     load_dotenv()
-    _start = _required_ts("CATALOG_START")
-    _end = _required_ts("CATALOG_END")
-    if _end <= _start:
-        raise SystemExit(f"CATALOG_END ({_end}) must be after CATALOG_START ({_start})")
     return Settings(
         okx_env=_env("OKX_ENV", "demo"),
         confirm_live=_env("CONFIRM_LIVE", "NO"),
@@ -92,6 +88,6 @@ def load_settings() -> Settings:
         bt_latency_ms=int(_env("BT_LATENCY_MS", "200")),
         bt_prob_fill_on_limit=float(_env("BT_PROB_FILL_ON_LIMIT", "0.7")),
         bt_prob_slippage=float(_env("BT_PROB_SLIPPAGE", "0.1")),
-        catalog_start=_start,
-        catalog_end=_end,
+        catalog_start=_optional_ts("CATALOG_START"),
+        catalog_end=_optional_ts("CATALOG_END"),
     )
