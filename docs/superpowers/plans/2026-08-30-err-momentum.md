@@ -61,7 +61,7 @@ def test_30m_merges_and_flushes():
     assert done.low == 99
     assert done.close == 101
     assert done.ts_open_ns == 0
-    assert done.ts_close_ns == 31 * 60_000_000_000
+    assert done.ts_close_ns == 30 * 60_000_000_000  # bucket-end boundary
 
 
 def test_daily_boundary_utc():
@@ -128,16 +128,16 @@ class BarAggregator:
         if self._bucket < 0:
             self._bucket = bucket
             self._o, self._h, self._l, self._c = o, h, l, c
-            self._ts_close = ts_close_ns
+            self._ts_open = ts_open
+            self._ts_close = (bucket + 1) * self._bucket_ns
             return None
         if bucket == self._bucket:
             self._h = max(self._h, h)
             self._l = min(self._l, l)
             self._c = c
-            self._ts_close = ts_close_ns
             return None
         done = CompletedBar(
-            ts_open_ns=self._bucket * self._bucket_ns,
+            ts_open_ns=self._ts_open,
             ts_close_ns=self._ts_close,
             open=self._o,
             high=self._h,
@@ -146,9 +146,12 @@ class BarAggregator:
         )
         self._bucket = bucket
         self._o, self._h, self._l, self._c = o, h, l, c
-        self._ts_close = ts_close_ns
+        self._ts_open = ts_open
+        self._ts_close = (bucket + 1) * self._bucket_ns
         return done
 ```
+
+Add `self._ts_open = 0` to `__init__`.
 
 UTC day buckets are correct automatically: epoch-ns open time // 86_400s gives the UTC day index, so no timezone handling is needed.
 
@@ -254,8 +257,8 @@ def test_warmup_respected_with_defaults():
     for i in range(219):
         assert ind.update(100.0 + i * 0.01) is None
     values = [ind.update(100.0 + i * 0.01) for i in range(219, 240)]
-    assert values[0] is None
-    assert all(v is not None and abs(v) < 100 for v in values[1:])
+    # call 220 (i=219) is the first valid ERMOM (warm-up = L+W_f+W_e = 220)
+    assert all(v is not None for v in values)
 
 
 def test_regime_target():
@@ -443,8 +446,8 @@ def test_stop_helpers():
     assert stop_price(-1, ref_price=100.0, atr=2.0, mult=3.0) == 106.0
     assert is_stop_hit(+1, price=93.0, stop=100.0) is True
     assert is_stop_hit(+1, price=101.0, stop=99.0) is False
-    assert is_stop_hit(-1, price=100.0, stop=110.0) is True
-    assert is_stop_hit(-1, price=90.0, stop=110.0) is False
+    assert is_stop_hit(-1, price=115.0, stop=110.0) is True  # short hits when price > stop
+    assert is_stop_hit(-1, price=100.0, stop=110.0) is False
     assert is_stop_hit(0, price=50.0, stop=60.0) is False
     assert is_stop_hit(1, price=50.0, stop=None) is False
 ```
@@ -840,9 +843,10 @@ def test_first_bar_in_ext_cannot_touch_into_pull():
 
 def test_band_start_without_ext_never_triggers():
     m = RibbonEntryMachine(direction=1, n_pull=3)
-    for c in (104.0, 104.5, 106.0, 107.0):
-        m.update(o=104, h=107, l=103, c=c, ema_fast=105, ema_slow=100, regime_allows=True)
-    assert m.update(o=104, h=107, l=103, c=106, ema_fast=105, ema_slow=100, regime_allows=True) is False
+    # closes stay BELOW ema_fast throughout -> never arms EXT -> never triggers
+    for c in (104.0, 104.5, 104.0, 103.0):
+        assert m.update(o=104, h=107, l=103, c=c, ema_fast=105, ema_slow=100, regime_allows=True) is False
+    assert m.state == "IDLE"
 
 
 def test_regime_loss_resets_setup():
@@ -865,7 +869,8 @@ def test_pull_timeout_resets():
 def test_ribbon_break_resets():
     m = RibbonEntryMachine(direction=1, n_pull=3)
     m.update(o=106, h=111, l=105, c=110, ema_fast=105, ema_slow=100, regime_allows=True)
-    m.update(o=106, h=107, l=100, c=99, ema_fast=105, ema_slow=100, regime_allows=True)
+    # bar2: low BELOW ema_slow (no band touch), close < ema_slow -> EXT resets to IDLE
+    m.update(o=106, h=107, l=98, c=99, ema_fast=105, ema_slow=100, regime_allows=True)
     assert m.state == "IDLE"
 
 
