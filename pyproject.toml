@@ -21,6 +21,7 @@ dev = [
 backtest-okx = "sngw_trader.runners.backtest_okx:main"
 live-okx = "sngw_trader.runners.live_okx:main"
 wf-okx = "sngw_trader.research.walk_forward:main"
+catalog-download = "sngw_trader.data.catalog_writer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

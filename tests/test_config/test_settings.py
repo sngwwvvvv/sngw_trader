@@ -1,4 +1,7 @@
-from sngw_trader.config.settings import Settings, load_settings
+from datetime import datetime
+
+from sngw_trader.config import load_settings
+from sngw_trader.config.settings import Settings
 
 
 def test_instrument_id_appends_venue() -> None:
@@ -37,6 +40,8 @@ def test_instrument_id_appends_venue() -> None:
         vol_filter_enabled=True,
         vol_lookback=20,
         vol_threshold=0.80,
+        catalog_start=datetime(2026, 1, 1),
+        catalog_end=datetime(2026, 3, 1),
     )
     assert settings.instrument_id_str == "BTC-USDT-SWAP.OKX"
     assert settings.is_demo is True
@@ -79,6 +84,8 @@ def test_live_requires_confirm() -> None:
         vol_filter_enabled=True,
         vol_lookback=20,
         vol_threshold=0.80,
+        catalog_start=datetime(2026, 1, 1),
+        catalog_end=datetime(2026, 3, 1),
     )
     assert settings.instrument_id_str == "ETH-USDT-SWAP.OKX"
     assert settings.is_demo is False
@@ -92,3 +99,48 @@ def test_err_mom_defaults():
     assert s.ema_fast < s.ema_slow
     assert s.vol_threshold == 0.80
     assert s.trade_size == "0.01"
+
+
+def _base_env() -> dict[str, str]:
+    return {
+        "OKX_ENV": "demo",
+        "CATALOG_START": "2026-01-01",
+        "CATALOG_END": "2026-03-01",
+    }
+
+
+def test_load_settings_parses_catalog_range(monkeypatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = load_settings()
+    assert s.catalog_start == datetime(2026, 1, 1)
+    assert s.catalog_end == datetime(2026, 3, 1)
+
+
+def test_load_settings_without_catalog_range_succeeds(monkeypatch) -> None:
+    monkeypatch.setenv("OKX_ENV", "demo")
+    s = load_settings()
+    assert s.catalog_start is None
+    assert s.catalog_end is None
+
+
+def test_load_settings_rejects_malformed_catalog_start(monkeypatch) -> None:
+    monkeypatch.setenv("OKX_ENV", "demo")
+    monkeypatch.setenv("CATALOG_START", "not-a-date")
+    import pytest
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_download_bars_rejects_inverted_range(monkeypatch) -> None:
+    import pytest
+
+    from sngw_trader.data.catalog_writer import _validate_range
+
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CATALOG_START", "2026-03-01")
+    monkeypatch.setenv("CATALOG_END", "2026-01-01")
+    s = load_settings()
+    with pytest.raises(SystemExit):
+        _validate_range(s)

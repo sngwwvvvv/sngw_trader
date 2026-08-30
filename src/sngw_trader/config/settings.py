@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from sngw_trader.config.dotenv import load_dotenv
@@ -12,6 +13,16 @@ from sngw_trader.config.dotenv import load_dotenv
 def _env(name: str, default: str = "") -> str:
     value = os.environ.get(name, default)
     return value.strip()
+
+
+def _optional_ts(name: str) -> datetime | None:
+    raw = _env(name)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be ISO8601/YYYY-MM-DD, got {raw!r}")
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,8 @@ class Settings:
     vol_filter_enabled: bool
     vol_lookback: int
     vol_threshold: float
+    catalog_start: datetime | None
+    catalog_end: datetime | None
 
     @property
     def is_demo(self) -> bool:
@@ -90,7 +103,7 @@ def load_settings() -> Settings:
         bt_latency_ms=int(_env("BT_LATENCY_MS", "200")),
         bt_prob_fill_on_limit=float(_env("BT_PROB_FILL_ON_LIMIT", "0.7")),
         bt_prob_slippage=float(_env("BT_PROB_SLIPPAGE", "0.1")),
-        strategy=_env("STRATEGY", "err_mom_a"),
+strategy=_env("STRATEGY", "err_mom_a"),
         w_f=int(_env("ERMOM_WF", "10")),
         w_e=int(_env("ERMOM_WE", "10")),
         momentum_window=int(_env("ERMOM_L", "200")),
@@ -105,4 +118,6 @@ def load_settings() -> Settings:
         vol_filter_enabled=_env("VOL_FILTER_ENABLED", "true").lower() in {"1", "true", "yes"},
         vol_lookback=int(_env("VOL_LOOKBACK", "20")),
         vol_threshold=float(_env("VOL_THRESHOLD", "0.80")),
+        catalog_start=_optional_ts("CATALOG_START"),
+        catalog_end=_optional_ts("CATALOG_END"),
     )

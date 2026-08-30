@@ -25,7 +25,7 @@ def _settings(**kwargs) -> Settings:
         bt_latency_ms=100,
         bt_prob_fill_on_limit=0.7,
         bt_prob_slippage=0.1,
-        strategy="err_mom_a",
+strategy="err_mom_a",
         w_f=10,
         w_e=10,
         momentum_window=200,
@@ -40,6 +40,8 @@ def _settings(**kwargs) -> Settings:
         vol_filter_enabled=True,
         vol_lookback=20,
         vol_threshold=0.80,
+        catalog_start=__import__("datetime").datetime(2026, 1, 1),
+        catalog_end=__import__("datetime").datetime(2026, 3, 1),
     )
     base.update(kwargs)
     return Settings(**base)
