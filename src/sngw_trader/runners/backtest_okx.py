@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import (
     BacktestDataConfig,
@@ -96,6 +98,24 @@ def attach_strategy(node: BacktestNode, run_id: object, settings: Settings) -> N
     raise RuntimeError("BacktestNode has no compatible add_strategy method")
 
 
+def _export_fills(node: BacktestNode, path: Path) -> None:
+    trader = None
+    for engine in node.get_engines():
+        if engine is not None and hasattr(engine, "trader"):
+            trader = engine.trader
+            break
+    if trader is None and hasattr(node, "trader"):
+        trader = node.trader
+    if trader is None:
+        raise RuntimeError(
+            "Cannot locate trader for the fills report. Inspect: "
+            'uv run python -c "from nautilus_trader.backtest.node import BacktestNode; print(dir(BacktestNode))"'
+        )
+    df = trader.generate_order_fills_report()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
 def main() -> None:
     settings = load_settings()
     settings.catalog_path.mkdir(parents=True, exist_ok=True)
@@ -112,6 +132,7 @@ def main() -> None:
     try:
         results = node.run()
         print(results)
+        _export_fills(node, Path(settings.log_dir) / "fills.csv")
     finally:
         if hasattr(node, "dispose"):
             node.dispose()
