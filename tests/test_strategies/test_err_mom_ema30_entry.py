@@ -12,6 +12,29 @@ from sngw_trader.strategies.err_mom_ema30_entry import (
 EF, ES = 105.0, 100.0
 
 
+def _make_strategy():
+    config = ErrMomEma30EntryConfig(
+        instrument_id=InstrumentId.from_str("BTC-USDT-SWAP.OKX"),
+        bar_type=BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+        trade_size=Decimal("0.01"),
+    )
+    return ErrMomEma30Entry(config=config)
+
+
+def test_regime_sign_flip_resets_opposite_machine():
+    s = _make_strategy()
+    long = s._prepare_machine(1)
+    assert s._long.state == "IDLE"
+    assert long.update(o=106, h=111, l=105, c=110, ema_fast=EF, ema_slow=ES, regime_allows=True) is False
+    assert s._long.state == "EXT"
+    short = s._prepare_machine(-1)
+    assert short is s._short
+    assert s._long.state == "IDLE"
+    long2 = s._prepare_machine(1)
+    assert long2 is s._long
+    assert s._long.state == "IDLE"
+
+
 def test_long_fsm_full_path():
     m = RibbonEntryMachine(direction=1, n_pull=3)
     assert m.update(o=106, h=111, l=105, c=110, ema_fast=EF, ema_slow=ES, regime_allows=True) is False

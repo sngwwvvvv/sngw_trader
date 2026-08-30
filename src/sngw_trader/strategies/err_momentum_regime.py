@@ -91,6 +91,7 @@ class ErrMomentumRegime(Strategy):
             self._stop = None
         elif self._pending_atr is not None:
             self._stop = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
+            self._pending_atr = None
 
     def _current_side(self) -> int:
         if self.portfolio.is_net_long(self.config.instrument_id):

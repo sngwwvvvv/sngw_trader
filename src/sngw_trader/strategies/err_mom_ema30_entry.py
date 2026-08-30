@@ -130,6 +130,7 @@ class ErrMomEma30Entry(Strategy):
         self._short = RibbonEntryMachine(-1, config.n_pull)
         self._stop: float | None = None
         self._pending_atr: float | None = None
+        self._active_direction = 0
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -149,6 +150,19 @@ class ErrMomEma30Entry(Strategy):
         m30 = self._m30.update(ts, o, h, l, c)
         if m30 is not None:
             self._on_30m(m30)
+
+    def _prepare_machine(self, regime: int) -> RibbonEntryMachine:
+        """Select the active direction machine, resetting both on sign flip.
+
+        Direct +1<->-1 flips (flat) must not carry stale EXT/PULL across the
+        flip: a re-entry needs a fresh EXT->PULL->TRIG pass (spec 3.3).
+        """
+        active = 1 if regime > 0 else -1
+        if active != self._active_direction:
+            self._long.reset()
+            self._short.reset()
+            self._active_direction = active
+        return self._long if active > 0 else self._short
 
     def _on_30m(self, bar30: CompletedBar) -> None:
         ema_f = self._ema_fast.update(bar30.close)
@@ -177,7 +191,7 @@ class ErrMomEma30Entry(Strategy):
             self._short.reset()
             return
 
-        machine = self._long if regime > 0 else self._short
+        machine = self._prepare_machine(regime)
         if machine.update(
             o=bar30.open, h=bar30.high, l=bar30.low, c=bar30.close,
             ema_fast=ema_f, ema_slow=ema_s, regime_allows=True,
@@ -208,3 +222,4 @@ class ErrMomEma30Entry(Strategy):
         if self._pending_atr is not None:
             side = 1 if self.portfolio.is_net_long(self.config.instrument_id) else -1
             self._stop = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
+            self._pending_atr = None
