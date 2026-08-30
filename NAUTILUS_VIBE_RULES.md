@@ -86,6 +86,7 @@ sngw_trader/
       backtest_okx.py            # BacktestNode 조립만
       live_okx.py                # TradingNode 조립만
       sandbox_okx.py             # 선택
+    research/                    # 백테스트 오케스트레이션 (WF/MC). 창 분할·반복 실행·집계만
     config/
       types.py                   # 공용 typed config
   catalog/                       # parquet catalog (git 제외)
@@ -105,6 +106,7 @@ sngw_trader/
 - `runners/` : 노드 조립, 클라이언트 등록, 전략 부착, `run()`/`dispose()`.
 - `actors/` : 전략이 아닌 보조 컴포넌트.
 - `deploy/` : systemd / compose. 전략 로직 없음.
+- `research/` : 창 분할, BacktestNode 반복 실행, 집계. 매매 조건 없음.
 
 전략 파일이 `TradingNode`나 OKX factory를 import하면 잘못된 설계다.  
 러너 파일이 매매 조건을 가지면 잘못된 설계다.
