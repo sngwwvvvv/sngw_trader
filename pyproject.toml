@@ -20,6 +20,7 @@ dev = [
 [project.scripts]
 backtest-okx = "sngw_trader.runners.backtest_okx:main"
 live-okx = "sngw_trader.runners.live_okx:main"
+wf-okx = "sngw_trader.research.walk_forward:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
