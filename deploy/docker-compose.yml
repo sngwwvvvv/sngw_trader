@@ -1,0 +1,28 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+  trader:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      REDIS_HOST: redis
+      REDIS_ENABLED: "true"
+    depends_on:
+      - redis
+    volumes:
+      - ../logs:/app/logs
+      - ../catalog:/app/catalog
+    init: true
+    stop_grace_period: 30s
+
+volumes:
+  redis-data:

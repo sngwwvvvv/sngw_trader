@@ -1,0 +1,16 @@
+[Unit]
+Description=Nautilus LiveNode OKX
+After=network.target redis.service
+
+[Service]
+User=trader
+WorkingDirectory=/opt/my_trader
+EnvironmentFile=/opt/my_trader/.env
+ExecStart=/opt/my_trader/.venv/bin/python -m sngw_trader.runners.live_okx
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

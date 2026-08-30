@@ -1,0 +1,16 @@
+---
+description: NautilusTrader + OKX runner lock
+alwaysApply: true
+---
+
+이 저장소는 NautilusTrader가 전략 러너다.
+자체 트레이딩 루프, ccxt, python-okx 직접 주문은 금지.
+거래소는 OKX만. InstrumentId는 *.OKX.
+전략은 nautilus_trader.trading.Strategy 한 클래스.
+백테스트는 BacktestNode + ParquetDataCatalog.
+라이브는 LiveNode + OKX data/exec factory.
+시크릿은 OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE.
+기본 실행 모드는 OKX DEMO.
+전략 파일은 노드/어댑터를 조립하지 않고,
+러너 파일은 매매 조건을 갖지 않는다.
+자세한 규칙은 NAUTILUS_VIBE_RULES.md 를 따른다.

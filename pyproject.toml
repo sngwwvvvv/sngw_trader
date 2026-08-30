@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-trader"
+version = "0.1.0"
+description = "NautilusTrader strategy package for OKX. The node is the runner."
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "nautilus_trader",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+backtest-okx = "sngw_trader.runners.backtest_okx:main"
+live-okx = "sngw_trader.runners.live_okx:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
