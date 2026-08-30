@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import (
     BacktestDataConfig,
@@ -63,7 +65,15 @@ def build_latency_model_config(settings: Settings) -> ImportableLatencyModelConf
     )
 
 
-def build_run_config(catalog_path: str, instrument_id: str, settings: Settings) -> BacktestRunConfig:
+def build_run_config(
+    catalog_path: str,
+    instrument_id: str,
+    settings: Settings,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    dispose_on_completion: bool = True,
+    raise_exception: bool = False,
+) -> BacktestRunConfig:
     venue = BacktestVenueConfig(
         name="OKX",
         oms_type=OmsType.NETTING,
@@ -78,30 +88,28 @@ def build_run_config(catalog_path: str, instrument_id: str, settings: Settings) 
         data_cls=Bar,
         catalog_path=catalog_path,
         instrument_id=instrument_id,
+        start_time=start.isoformat() if start else None,
+        end_time=end.isoformat() if end else None,
     )
     return BacktestRunConfig(
         venues=[venue],
         data=[data],
         engine=BacktestEngineConfig(),
+        dispose_on_completion=dispose_on_completion,
+        raise_exception=raise_exception,
     )
 
 
-def attach_strategy(node: BacktestNode, run_id: object, instrument_id: str) -> None:
+def attach_strategy(node: BacktestNode, run_config: BacktestRunConfig, instrument_id: str) -> None:
+    engine = node.get_engine(run_config.id)
+    if engine is None:
+        raise RuntimeError(f"No engine built for run config {run_config.id}; call node.build() first")
     strategy = build_ema_cross(
         instrument_id=instrument_id,
         bar_type=default_bar_type(instrument_id),
         trade_size="0.01",
     )
-    if hasattr(node, "add_strategy"):
-        try:
-            node.add_strategy(strategy)
-            return
-        except TypeError:
-            pass
-    if hasattr(node, "add_strategy"):
-        node.add_strategy(run_id, strategy)
-        return
-    raise RuntimeError("BacktestNode has no compatible add_strategy method")
+    engine.add_strategy(strategy)
 
 
 def main() -> None:
@@ -115,7 +123,7 @@ def main() -> None:
     )
     node = BacktestNode(configs=[run_config])
     node.build()
-    attach_strategy(node, run_config.id, settings.instrument_id_str)
+    attach_strategy(node, run_config, settings.instrument_id_str)
 
     try:
         results = node.run()
