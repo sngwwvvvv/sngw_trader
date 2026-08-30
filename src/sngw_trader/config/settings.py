@@ -30,6 +30,11 @@ class Settings:
     redis_enabled: bool
     redis_host: str
     redis_port: int
+    bt_maker_fee: float
+    bt_taker_fee: float
+    bt_latency_ms: int
+    bt_prob_fill_on_limit: float
+    bt_prob_slippage: float
 
     @property
     def is_demo(self) -> bool:
@@ -64,4 +69,10 @@ def load_settings() -> Settings:
         redis_enabled=_env("REDIS_ENABLED", "false").lower() in {"1", "true", "yes"},
         redis_host=_env("REDIS_HOST", "127.0.0.1"),
         redis_port=int(_env("REDIS_PORT", "6379")),
+        # OKX SWAP standard tier: maker 0.02% / taker 0.05% (spot: 0.08% / 0.10%)
+        bt_maker_fee=float(_env("BT_MAKER_FEE", "0.0002")),
+        bt_taker_fee=float(_env("BT_TAKER_FEE", "0.0005")),
+        bt_latency_ms=int(_env("BT_LATENCY_MS", "200")),
+        bt_prob_fill_on_limit=float(_env("BT_PROB_FILL_ON_LIMIT", "0.7")),
+        bt_prob_slippage=float(_env("BT_PROB_SLIPPAGE", "0.1")),
     )
