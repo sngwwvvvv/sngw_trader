@@ -15,6 +15,7 @@ def _settings() -> Settings:
         redis_enabled=False, redis_host="", redis_port=6379,
         bt_maker_fee=0.0002, bt_taker_fee=0.0005, bt_latency_ms=200,
         bt_prob_fill_on_limit=0.7, bt_prob_slippage=0.1,
+        catalog_start=datetime(2026, 1, 1), catalog_end=datetime(2026, 3, 1),
     )
 
 
