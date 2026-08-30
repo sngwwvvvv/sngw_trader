@@ -34,8 +34,6 @@ class _Money:
 
 
 def _pos(closed: bool, ts: int, pnl: float, ret: float):
-    from types import SimpleNamespace
-
     return SimpleNamespace(is_closed=closed, ts_closed=ts, realized_pnl=_Money(pnl), realized_return=ret)
 
 

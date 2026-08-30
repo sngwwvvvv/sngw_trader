@@ -1,7 +1,8 @@
 import json
 
+from sngw_trader.research.config import MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult
-from sngw_trader.research.walk_forward import load_grid, stitch_oos
+from sngw_trader.research.walk_forward import build_wf_configs, load_grid, stitch_oos
 
 
 def test_stitch_concatenates_skipping_no_trade_windows():
@@ -35,3 +36,23 @@ def test_load_grid_from_json(tmp_path, monkeypatch):
     spec = load_grid()
     assert spec.fixed == {"trade_size": "0.02"}
     assert spec.grid == {"fast_ema_period": [5, 10]}
+
+
+def test_env_override_configs(monkeypatch):
+    monkeypatch.delenv("WF_MIN_TRADES", raising=False)
+    monkeypatch.delenv("MC_ITERS", raising=False)
+    wf, mc = build_wf_configs()
+    assert isinstance(wf, WalkForwardConfig)
+    assert isinstance(mc, MCConfig)
+    assert wf.min_trades == 30
+    assert mc.n_sims == 1000
+
+    monkeypatch.setenv("WF_MIN_TRADES", "99")
+    monkeypatch.setenv("MC_ITERS", "777")
+    monkeypatch.setenv("MC_SEED", "13")
+    monkeypatch.setenv("MC_RUIN_THRESHOLD", "-0.2")
+    monkeypatch.setenv("MC_INITIAL_CAPITAL", "12345.5")
+    wf, mc = build_wf_configs()
+    assert wf.min_trades == 99
+    assert mc.n_sims == 777 and mc.seed == 13
+    assert mc.ruin_threshold == -0.2 and mc.initial_capital == 12345.5

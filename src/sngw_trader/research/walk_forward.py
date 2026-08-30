@@ -40,14 +40,20 @@ def load_grid() -> GridSpec:
     )
 
 
+def _parse_utc(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def detect_data_range(catalog_path: str, bar_type: str) -> tuple[datetime, datetime]:
     env_start = os.environ.get("WF_DATA_START")
     env_end = os.environ.get("WF_DATA_END")
+    if (env_start is None) != (env_end is None):
+        raise ValueError("set both WF_DATA_START and WF_DATA_END, or neither")
     if env_start and env_end:
-        return (
-            datetime.fromisoformat(env_start).replace(tzinfo=timezone.utc),
-            datetime.fromisoformat(env_end).replace(tzinfo=timezone.utc),
-        )
+        return _parse_utc(env_start), _parse_utc(env_end)
     catalog = ParquetDataCatalog(path=catalog_path)
     first = catalog.query_first_timestamp(Bar, identifier=bar_type)
     last = catalog.query_last_timestamp(Bar, identifier=bar_type)
@@ -88,10 +94,36 @@ def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) ->
     return results, sharpes
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw is not None else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    return float(raw) if raw is not None else default
+
+
+def build_wf_configs() -> tuple[WalkForwardConfig, MCConfig]:
+    wf_cfg = WalkForwardConfig(
+        is_months=_env_int("WF_IS_MONTHS", 6),
+        oos_months=_env_int("WF_OOS_MONTHS", 3),
+        holdout_months=_env_int("WF_HOLDOUT_MONTHS", 6),
+        warmup_days=_env_int("WF_WARMUP_DAYS", 1),
+        min_trades=_env_int("WF_MIN_TRADES", 30),
+    )
+    mc_cfg = MCConfig(
+        n_sims=_env_int("MC_ITERS", 1000),
+        seed=_env_int("MC_SEED", 42),
+        initial_capital=_env_float("MC_INITIAL_CAPITAL", 10000.0),
+        ruin_threshold=_env_float("MC_RUIN_THRESHOLD", -0.5),
+    )
+    return wf_cfg, mc_cfg
+
+
 def main() -> None:
     settings = load_settings()
-    wf_cfg = WalkForwardConfig()
-    mc_cfg = MCConfig()
+    wf_cfg, mc_cfg = build_wf_configs()
     spec = load_grid()
     instrument_id = settings.instrument_id_str
     catalog_path = str(settings.catalog_path)
