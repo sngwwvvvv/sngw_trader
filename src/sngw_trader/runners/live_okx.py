@@ -11,11 +11,7 @@ from nautilus_trader.model import AccountId, TraderId
 
 from sngw_trader.config import Settings, load_settings
 from sngw_trader.runners.okx_factories import instrument_type_from_settings, load_okx_symbols
-from sngw_trader.runners.strategy_factory import build_ema_cross
-
-
-def default_bar_type(instrument_id: str) -> str:
-    return f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+from sngw_trader.runners.strategy_factory import build_strategy
 
 
 def assert_safe_mode(settings: Settings) -> None:
@@ -94,12 +90,7 @@ def build_node(settings: Settings) -> TradingNode:
 
 
 def attach_strategy(node: TradingNode, settings: Settings) -> None:
-    strategy = build_ema_cross(
-        instrument_id=settings.instrument_id_str,
-        bar_type=default_bar_type(settings.instrument_id_str),
-        trade_size="0.01",
-    )
-    node.trader.add_strategy(strategy)
+    node.trader.add_strategy(build_strategy(settings))
 
 
 def main() -> None:

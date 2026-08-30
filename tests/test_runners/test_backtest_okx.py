@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from sngw_trader.config.settings import Settings
 from sngw_trader.runners.backtest_okx import attach_strategy, build_run_config
 
@@ -15,6 +13,10 @@ def _settings() -> Settings:
         redis_enabled=False, redis_host="", redis_port=6379,
         bt_maker_fee=0.0002, bt_taker_fee=0.0005, bt_latency_ms=200,
         bt_prob_fill_on_limit=0.7, bt_prob_slippage=0.1,
+        strategy="err_mom_a", w_f=10, w_e=10, momentum_window=200, theta=0.0,
+        ema_fast=20, ema_slow=50, n_pull=24, trade_size="0.01",
+        risk_stop_enabled=True, atr_period=14, atr_mult=3.0,
+        vol_filter_enabled=True, vol_lookback=20, vol_threshold=0.80,
     )
 
 
@@ -36,34 +38,28 @@ def test_build_run_config_defaults_unchanged():
     assert cfg.raise_exception is False
 
 
-class _StubEngine:
+class _StubNode:
     def __init__(self):
         self.added = []
 
-    def add_strategy(self, strategy):
+    def add_strategy(self, *args):
+        strategy = args[0] if args else None
         self.added.append(strategy)
 
 
-class _StubRunConfig:
-    def __init__(self, run_id):
-        self.id = run_id
+def test_attach_strategy_builds_configured_strategy():
+    node = _StubNode()
+    attach_strategy(node, "run-config-id", _settings())
+    assert len(node.added) == 1
+    assert node.added[0].config.instrument_id.value == "BTC-USDT-SWAP.OKX"
 
 
-class _StubNode:
-    def __init__(self, engine):
-        self._engine = engine
+def test_attach_strategy_no_compatible_method_raises():
+    class _NoAdd:
+        pass
 
-    def get_engine(self, run_config_id):
-        return self._engine
-
-
-def test_attach_strategy_goes_to_engine():
-    engine = _StubEngine()
-    attach_strategy(_StubNode(engine), _StubRunConfig("run-config-id"), "BTC-USDT-SWAP.OKX")
-    assert len(engine.added) == 1
-    assert engine.added[0].config.fast_ema_period == 10
-
-
-def test_attach_strategy_raises_without_engine():
-    with pytest.raises(RuntimeError):
-        attach_strategy(_StubNode(None), _StubRunConfig("run-config-id"), "BTC-USDT-SWAP.OKX")
+    try:
+        attach_strategy(_NoAdd(), "run-config-id", _settings())
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError:
+        pass

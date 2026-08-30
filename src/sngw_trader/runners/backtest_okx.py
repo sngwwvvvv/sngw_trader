@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import (
@@ -21,7 +22,7 @@ from nautilus_trader.model.enums import AccountType, BookType, OmsType
 
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
-from sngw_trader.runners.strategy_factory import build_ema_cross
+from sngw_trader.runners.strategy_factory import build_strategy
 
 
 def default_bar_type(instrument_id: str) -> str:
@@ -100,16 +101,36 @@ def build_run_config(
     )
 
 
-def attach_strategy(node: BacktestNode, run_config: BacktestRunConfig, instrument_id: str) -> None:
-    engine = node.get_engine(run_config.id)
-    if engine is None:
-        raise RuntimeError(f"No engine built for run config {run_config.id}; call node.build() first")
-    strategy = build_ema_cross(
-        instrument_id=instrument_id,
-        bar_type=default_bar_type(instrument_id),
-        trade_size="0.01",
-    )
-    engine.add_strategy(strategy)
+def attach_strategy(node: BacktestNode, run_id: object, settings: Settings) -> None:
+    strategy = build_strategy(settings)
+    if hasattr(node, "add_strategy"):
+        try:
+            node.add_strategy(strategy)
+            return
+        except TypeError:
+            pass
+    if hasattr(node, "add_strategy"):
+        node.add_strategy(run_id, strategy)
+        return
+    raise RuntimeError("BacktestNode has no compatible add_strategy method")
+
+
+def _export_fills(node: BacktestNode, path: Path) -> None:
+    trader = None
+    for engine in node.get_engines():
+        if engine is not None and hasattr(engine, "trader"):
+            trader = engine.trader
+            break
+    if trader is None and hasattr(node, "trader"):
+        trader = node.trader
+    if trader is None:
+        raise RuntimeError(
+            "Cannot locate trader for the fills report. Inspect: "
+            'uv run python -c "from nautilus_trader.backtest.node import BacktestNode; print(dir(BacktestNode))"'
+        )
+    df = trader.generate_order_fills_report()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
 
 
 def main() -> None:
@@ -123,11 +144,12 @@ def main() -> None:
     )
     node = BacktestNode(configs=[run_config])
     node.build()
-    attach_strategy(node, run_config, settings.instrument_id_str)
+    attach_strategy(node, run_config.id, settings)
 
     try:
         results = node.run()
         print(results)
+        _export_fills(node, Path(settings.log_dir) / "fills.csv")
     finally:
         if hasattr(node, "dispose"):
             node.dispose()

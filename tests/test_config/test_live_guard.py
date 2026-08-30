@@ -25,6 +25,21 @@ def _settings(**kwargs) -> Settings:
         bt_latency_ms=100,
         bt_prob_fill_on_limit=0.7,
         bt_prob_slippage=0.1,
+        strategy="err_mom_a",
+        w_f=10,
+        w_e=10,
+        momentum_window=200,
+        theta=0.0,
+        ema_fast=20,
+        ema_slow=50,
+        n_pull=24,
+        trade_size="0.01",
+        risk_stop_enabled=True,
+        atr_period=14,
+        atr_mult=3.0,
+        vol_filter_enabled=True,
+        vol_lookback=20,
+        vol_threshold=0.80,
     )
     base.update(kwargs)
     return Settings(**base)
