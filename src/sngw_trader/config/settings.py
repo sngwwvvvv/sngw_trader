@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from sngw_trader.config.dotenv import load_dotenv
@@ -12,6 +13,16 @@ from sngw_trader.config.dotenv import load_dotenv
 def _env(name: str, default: str = "") -> str:
     value = os.environ.get(name, default)
     return value.strip()
+
+
+def _required_ts(name: str) -> datetime:
+    raw = _env(name)
+    if not raw:
+        raise SystemExit(f"{name} is required for catalog download")
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be ISO8601/YYYY-MM-DD, got {raw!r}")
 
 
 @dataclass(frozen=True)
@@ -35,6 +46,8 @@ class Settings:
     bt_latency_ms: int
     bt_prob_fill_on_limit: float
     bt_prob_slippage: float
+    catalog_start: datetime
+    catalog_end: datetime
 
     @property
     def is_demo(self) -> bool:
@@ -54,6 +67,10 @@ class Settings:
 
 def load_settings() -> Settings:
     load_dotenv()
+    _start = _required_ts("CATALOG_START")
+    _end = _required_ts("CATALOG_END")
+    if _end <= _start:
+        raise SystemExit(f"CATALOG_END ({_end}) must be after CATALOG_START ({_start})")
     return Settings(
         okx_env=_env("OKX_ENV", "demo"),
         confirm_live=_env("CONFIRM_LIVE", "NO"),
@@ -75,4 +92,6 @@ def load_settings() -> Settings:
         bt_latency_ms=int(_env("BT_LATENCY_MS", "200")),
         bt_prob_fill_on_limit=float(_env("BT_PROB_FILL_ON_LIMIT", "0.7")),
         bt_prob_slippage=float(_env("BT_PROB_SLIPPAGE", "0.1")),
+        catalog_start=_start,
+        catalog_end=_end,
     )
