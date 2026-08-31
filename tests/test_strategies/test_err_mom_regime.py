@@ -26,6 +26,12 @@ def test_config_builds():
         trade_size=Decimal("0.01"),
     )
     strategy = ErrMomentumRegime(config=config)
-    assert strategy.config.w_f == 10
-    assert strategy.config.momentum_window == 200
+    assert strategy.config.w_f == 5
+    assert strategy.config.w_e == 5
+    assert strategy.config.momentum_window == 48
+    assert strategy.config.vol_lookback == 120
+    assert strategy.config.reentry_cooldown_bars == 1
+    assert strategy._vol._ppy == 2190  # 4h returns annualization
+    assert strategy._daily._bucket_ns == 14_400 * 1_000_000_000  # 4h aggregation
+    assert strategy._ermom.warmup_bars == 58  # spec: warm-up 58 x 4h bars
     assert strategy.config.instrument_id.value.endswith(".OKX")

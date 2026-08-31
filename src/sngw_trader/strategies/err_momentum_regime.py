@@ -1,4 +1,4 @@
-"""Spec A: daily ERMOM regime IS the position.
+"""Spec A (4h): ERMOM regime IS the position, chandelier trailing stop on 1m stream.
 
 Strategy logic only. Do not import TradingNode or OKX factories here.
 """
@@ -27,16 +27,17 @@ class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
-    w_f: int = 10
-    w_e: int = 10
-    momentum_window: int = 200
+    w_f: int = 5
+    w_e: int = 5
+    momentum_window: int = 48
     theta: float = 0.0
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
     vol_filter_enabled: bool = True
-    vol_lookback: int = 20
+    vol_lookback: int = 120
     vol_threshold: float = 0.80
+    reentry_cooldown_bars: int = 1
     close_positions_on_stop: bool = True
 
 
@@ -54,10 +55,10 @@ def apply_entry_block(current: int, target: int, entry_blocked: bool) -> int:
 class ErrMomentumRegime(Strategy):
     def __init__(self, config: ErrMomentumRegimeConfig) -> None:
         super().__init__(config)
-        self._daily = BarAggregator(86_400)
+        self._daily = BarAggregator(14_400)
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
-        self._vol = RealizedVol(config.vol_lookback)
+        self._vol = RealizedVol(config.vol_lookback, periods_per_year=2190)
         self._stop_price: float | None = None
         self._pending_atr: float | None = None
 
