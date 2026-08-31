@@ -1,4 +1,4 @@
-"""Spec A: daily ERMOM regime IS the position.
+"""Spec A (4h): ERMOM regime IS the position, chandelier trailing stop on 1m stream.
 
 Strategy logic only. Do not import TradingNode or OKX factories here.
 """
@@ -27,16 +27,17 @@ class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
-    w_f: int = 10
-    w_e: int = 10
-    momentum_window: int = 200
+    w_f: int = 5
+    w_e: int = 5
+    momentum_window: int = 48
     theta: float = 0.0
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
     vol_filter_enabled: bool = True
-    vol_lookback: int = 20
+    vol_lookback: int = 120
     vol_threshold: float = 0.80
+    reentry_cooldown_bars: int = 1
     close_positions_on_stop: bool = True
 
 
@@ -54,12 +55,15 @@ def apply_entry_block(current: int, target: int, entry_blocked: bool) -> int:
 class ErrMomentumRegime(Strategy):
     def __init__(self, config: ErrMomentumRegimeConfig) -> None:
         super().__init__(config)
-        self._daily = BarAggregator(86_400)
+        self._daily = BarAggregator(14_400)
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
-        self._vol = RealizedVol(config.vol_lookback)
+        self._vol = RealizedVol(config.vol_lookback, periods_per_year=2190)
         self._stop_price: float | None = None
         self._pending_atr: float | None = None
+        self._high_water: float | None = None
+        self._low_water: float | None = None
+        self._cooldown_bars = 0
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -69,6 +73,13 @@ class ErrMomentumRegime(Strategy):
             self.close_all_positions(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
+        exited = False
+        side = self._current_side()
+        if self._trailing(side, bar.high.as_double(), bar.low.as_double()):
+            self.close_all_positions(self.config.instrument_id)
+            self._reset_stop()
+            self._cooldown_bars = self.config.reentry_cooldown_bars
+            exited = True
         daily = self._daily.update(
             int(bar.ts_init),
             bar.open.as_double(),
@@ -81,17 +92,13 @@ class ErrMomentumRegime(Strategy):
         self._ermom.update(daily.close)
         self._atr.update(daily.open, daily.high, daily.low, daily.close)
         self._vol.update(daily.close)
-        self._on_daily(daily)
+        if not exited:
+            self._on_bar_4h(daily)
 
     def on_event(self, event) -> None:
         if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
             return
-        side = self._current_side()
-        if side == 0:
-            self._stop_price = None
-        elif self._pending_atr is not None:
-            self._stop_price = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
-            self._pending_atr = None
+        self._on_fill(self._current_side(), event.last_px.as_double())
 
     def _current_side(self) -> int:
         if self.portfolio.is_net_long(self.config.instrument_id):
@@ -100,28 +107,62 @@ class ErrMomentumRegime(Strategy):
             return -1
         return 0
 
-    def _check_stop(self, price: float) -> bool:
-        if self.config.risk_stop_enabled and is_stop_hit(self._current_side(), price, self._stop_price):
-            self.close_all_positions(self.config.instrument_id)
-            self._stop_price = None
+    def _reset_stop(self) -> None:
+        self._stop_price = None
+        self._high_water = None
+        self._low_water = None
+
+    def _on_fill(self, side: int, fill_px: float) -> None:
+        """Seed stop/watermark only on the 0->+/-1 transition (partial fills skip)."""
+        if side == 0:
+            self._reset_stop()
+        elif self._pending_atr is not None:
+            self._stop_price = stop_price(side, fill_px, self._pending_atr, self.config.atr_mult)
+            if side > 0:
+                self._high_water = fill_px
+            else:
+                self._low_water = fill_px
+            self._pending_atr = None
+
+    def _trailing(self, side: int, high: float, low: float) -> bool:
+        """1m track: hit-check FIRST (vs prior stop), then watermark, then stop recalc."""
+        stop = self._stop_price
+        if not self.config.risk_stop_enabled or side == 0 or stop is None:
+            return False
+        if is_stop_hit(side, low if side > 0 else high, stop):
             return True
+        atr = self._atr.value
+        if atr is None:
+            return False
+        if side > 0:
+            self._high_water = max(self._high_water, high)
+            self._stop_price = max(stop, self._high_water - self.config.atr_mult * atr)
+        else:
+            self._low_water = min(self._low_water, low)
+            self._stop_price = min(stop, self._low_water + self.config.atr_mult * atr)
         return False
 
-    def _on_daily(self, daily: CompletedBar) -> None:
-        current = self._current_side()
-        if current != 0 and self._check_stop(daily.close):
-            return  # re-entry next daily bar via normal regime rule
-        entry_blocked = (
+    def _tick_4h(self) -> None:
+        if self._cooldown_bars > 0:
+            self._cooldown_bars -= 1
+
+    def _target_4h(self, current: int) -> int:
+        entry_blocked = self._cooldown_bars > 0 or (
             self.config.vol_filter_enabled
             and self._vol.value is not None
             and self._vol.value > self.config.vol_threshold
         )
-        target = apply_entry_block(current, regime_target(self._ermom.value, self.config.theta), entry_blocked)
+        return apply_entry_block(current, regime_target(self._ermom.value, self.config.theta), entry_blocked)
+
+    def _on_bar_4h(self, daily: CompletedBar) -> None:
+        self._tick_4h()
+        current = self._current_side()
+        target = self._target_4h(current)
         if current == target:
             return
         if current != 0:
             self.close_all_positions(self.config.instrument_id)
-            self._stop_price = None
+            self._reset_stop()
         if target != 0:
             self._submit(OrderSide.BUY if target > 0 else OrderSide.SELL)
 

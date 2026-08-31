@@ -54,6 +54,16 @@ def test_realized_vol_valid_after_warmup():
     assert v is not None and v > 0
 
 
+def test_realized_vol_periods_per_year_scaling():
+    v365 = RealizedVol(lookback=5)
+    v4h = RealizedVol(lookback=5, periods_per_year=2190)
+    for i in range(1, 8):
+        px = 100.0 * (1 + (0.01 if i % 2 else -0.01))
+        v365.update(px)
+        v4h.update(px)
+    assert math.isclose(v4h.value / v365.value, math.sqrt(2190 / 365), rel_tol=1e-9)
+
+
 def test_stop_helpers():
     assert stop_price(+1, ref_price=100.0, atr=2.0, mult=3.0) == 94.0
     assert stop_price(-1, ref_price=100.0, atr=2.0, mult=3.0) == 106.0
