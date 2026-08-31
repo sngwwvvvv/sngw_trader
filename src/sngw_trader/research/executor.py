@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.core.datetime import dt_to_unix_nanos
+from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.trading.config import ImportableStrategyConfig, StrategyFactory
 
 from sngw_trader.config.settings import Settings
@@ -20,6 +21,7 @@ class RunResult:
     trade_returns: list[float]
     n_trades: int
     total_pnl: float
+    equity_marks: list[tuple[int, float]] = field(default_factory=list)
 
 
 def build_strategy(spec: GridSpec, params: dict[str, object], instrument_id: str, bar_type: str):
@@ -52,6 +54,22 @@ def extract_run_result(positions: list, window_start_ns: int) -> RunResult:
     )
 
 
+def extract_equity_marks(cache, venue: str, window_start_ns: int) -> list[tuple[int, float]]:
+    """(ts_ns, balance total) marks from account state events at/after window start."""
+    account = cache.account_for_venue(Venue(venue))
+    if account is None:
+        return []
+    marks: list[tuple[int, float]] = []
+    for ev in account.events():
+        if ev.ts_init < window_start_ns or not ev.balances:
+            continue
+        # ponytail: 단일 자산 계정 가정. 복수 자산이면 최대 잔고 1개만 사용.
+        total = max(b.total.as_double() for b in ev.balances.values())
+        marks.append((ev.ts_init, total))
+    marks.sort(key=lambda m: m[0])
+    return marks
+
+
 def run_window(
     catalog_path: str,
     instrument_id: str,
@@ -80,6 +98,11 @@ def run_window(
     engine.add_strategy(build_strategy(spec, params, instrument_id, bar_type))
     try:
         node.run()
-        return extract_run_result(engine.cache.positions(), dt_to_unix_nanos(start))
+        window_start_ns = dt_to_unix_nanos(start)
+        result = extract_run_result(engine.cache.positions(), window_start_ns)
+        marks = extract_equity_marks(
+            engine.cache, instrument_id.rsplit(".", 1)[-1], window_start_ns
+        )
+        return replace(result, equity_marks=marks)
     finally:
         node.dispose()

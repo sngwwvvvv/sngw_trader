@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 from sngw_trader.research.config import GridSpec
-from sngw_trader.research.executor import build_strategy, extract_run_result
+from sngw_trader.research.executor import (
+    RunResult,
+    build_strategy,
+    extract_equity_marks,
+    extract_run_result,
+)
 
 SPEC = GridSpec(
     strategy_path="sngw_trader.strategies.example.ema_cross:EMACross",
@@ -54,3 +59,47 @@ def test_extract_filters_warmup_and_open_and_sorts():
 def test_extract_empty():
     r = extract_run_result([], window_start_ns=0)
     assert r.n_trades == 0 and r.trade_pnls == [] and r.total_pnl == 0.0
+
+
+class _Bal:
+    def __init__(self, v: float):
+        self.total = _Money(v)
+
+
+class _Ev:
+    def __init__(self, ts: int, bal: float):
+        self.ts_init = ts
+        self.balances = {"USDT": _Bal(bal)}
+
+
+class _Acc:
+    def __init__(self, events):
+        self._events = events
+
+    def events(self):
+        return self._events
+
+
+class _Cache:
+    def __init__(self, account):
+        self._account = account
+
+    def account_for_venue(self, venue):
+        return self._account
+
+
+def test_extract_equity_marks_filters_warmup_and_sorts():
+    acc = _Acc([_Ev(200, 10050.0), _Ev(50, 10000.0), _Ev(150, 9800.0)])
+    marks = extract_equity_marks(_Cache(acc), "OKX", window_start_ns=100)
+    assert marks == [(150, 9800.0), (200, 10050.0)]
+
+
+def test_extract_equity_marks_no_account_or_events():
+    assert extract_equity_marks(_Cache(None), "OKX", 0) == []
+    assert extract_equity_marks(_Cache(_Acc([])), "OKX", 0) == []
+    assert extract_equity_marks(_Cache(_Acc([_Ev(50, 100.0)])), "OKX", 100) == []
+
+
+def test_run_result_default_equity_marks():
+    r = RunResult([1.0], [0.01], 1, 1.0)
+    assert r.equity_marks == []
