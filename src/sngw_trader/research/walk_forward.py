@@ -14,6 +14,7 @@ from sngw_trader.config import load_settings
 from sngw_trader.research import report
 from sngw_trader.research.config import GridSpec, MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult, run_window
+from sngw_trader.research.metrics import compute_equity_metrics, compute_trade_metrics
 from sngw_trader.research.monte_carlo import bootstrap_trades
 from sngw_trader.research.select import param_keys, select_best, sharpe_from_trades
 from sngw_trader.research.windows import compute_windows, holdout_start
@@ -68,6 +69,44 @@ def stitch_oos(window_results: list[RunResult | None]) -> list[float]:
         if r is not None:
             out.extend(r.trade_pnls)
     return out
+
+
+def run_metrics(result: RunResult, initial_capital: float) -> dict:
+    return {
+        "trade": compute_trade_metrics(result.trade_pnls, result.trade_returns),
+        "equity": compute_equity_metrics(result.equity_marks, initial_capital),
+    }
+
+
+def oos_is_sharpe_ratio(is_sharpe: float, oos_result: RunResult) -> float | None:
+    """IS Sharpe <= 0이면 None 반환. '의미있는 전략 없음'으로 저장한다."""
+    if is_sharpe <= 0:
+        return None
+    return sharpe_from_trades(oos_result.trade_returns) / is_sharpe
+
+
+def robustness_summary(wf_windows: list[dict]) -> dict:
+    ratios = [w["oos_is_sharpe_ratio"] for w in wf_windows
+              if w.get("oos_is_sharpe_ratio") is not None]
+    eqs = [w["oos_metrics"]["equity"] for w in wf_windows
+           if w.get("oos_metrics") and w["oos_metrics"]["equity"]]
+
+    def agg(key: str, with_max: bool) -> dict:
+        vals = [m[key] for m in eqs if m.get(key) is not None]
+        out: dict = {"mean": sum(vals) / len(vals) if vals else None,
+                     "n_excluded": len(eqs) - len(vals)}
+        if with_max:
+            out["max"] = max(vals) if vals else None
+        return out
+
+    return {
+        "oos_is_sharpe_ratios": ratios,
+        "n_excluded_ratio_windows":
+            sum(1 for w in wf_windows if w.get("oos_is_sharpe_ratio") is None),
+        "oos_sortino": agg("sortino", with_max=False),
+        "oos_calmar": agg("calmar", with_max=False),
+        "oos_mdd_ratio": agg("mdd_ratio", with_max=True),
+    }
 
 
 def _params_for(spec: GridSpec, key: tuple) -> dict[str, object]:
