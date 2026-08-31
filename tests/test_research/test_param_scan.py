@@ -1,6 +1,6 @@
 import math
 
-from sngw_trader.research.param_scan import compute_metrics
+from sngw_trader.research.param_scan import _commission_total, compute_metrics
 
 
 def test_compute_metrics_empty():
@@ -29,3 +29,16 @@ def test_compute_metrics_basic():
 def test_compute_metrics_zero_std_sharpe():
     m = compute_metrics([10.0, 10.0], [0.01, 0.01], [1.0, 1.0])
     assert m["sharpe"] == 0.0
+
+
+def test_commission_total_sign_and_sum():
+    import pandas as pd
+
+    df = pd.DataFrame({"commission": ["-1.2 USDT", "-0.5 USDT", "0.3 USDT"]})
+    assert math.isclose(_commission_total(df), -1.4)
+
+
+def test_commission_total_missing_column():
+    import pandas as pd
+
+    assert _commission_total(pd.DataFrame({"price": [1.0]})) == 0.0

@@ -76,6 +76,20 @@ def compute_metrics(
     }
 
 
+def _commission_total(fills_df) -> float:
+    """Sum the commission column preserving sign (rebates are negative fees)."""
+    if "commission" not in fills_df.columns:
+        return 0.0
+    return float(
+        fills_df["commission"]
+        .astype(str)
+        .str.extract(r"(-?[\d.]+)")
+        .astype(float)
+        .sum()
+        .sum()
+    )
+
+
 def run_combo(params: dict, settings: Settings, instrument_id: str, bar_type: str) -> dict:
     run_config = build_run_config(
         str(settings.catalog_path), instrument_id, settings=settings,
@@ -98,11 +112,8 @@ def run_combo(params: dict, settings: Settings, instrument_id: str, bar_type: st
         rets = [p.realized_return for p in closed]
         holds = [(p.ts_closed - p.ts_open) / 1e9 / 3_600 for p in closed]
         fills_df = engine.trader.generate_order_fills_report()
-        fees = 0.0
-        if "commission" in fills_df.columns:
-            fees = fills_df["commission"].astype(str).str.extract(r"([\d.]+)").astype(float).sum()
         m = compute_metrics(pnls, rets, holds)
-        m["fees"] = float(fees.iloc[0]) if hasattr(fees, "iloc") else float(fees)
+        m["fees"] = _commission_total(fills_df)
         return m
     finally:
         node.dispose()
