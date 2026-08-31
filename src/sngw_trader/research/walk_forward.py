@@ -200,6 +200,10 @@ def main() -> None:
                 warmup_days=wf_cfg.warmup_days,
             )
         oos_results.append(oos_result)
+        oos_metrics = run_metrics(oos_result, mc_cfg.initial_capital) if oos_result else None
+        is_metrics = run_metrics(grid_results[best], mc_cfg.initial_capital) if best is not None else None
+        ratio = (oos_is_sharpe_ratio(sharpes[best], oos_result)
+                 if best is not None and oos_result is not None else None)
         wf_windows.append({
             "index": window.index,
             "is": {"start": window.is_start.isoformat(), "end": window.is_end.isoformat()},
@@ -210,6 +214,9 @@ def main() -> None:
                 for k in grid_results
             ],
             "oos": None if oos_result is None else {"n_trades": oos_result.n_trades, "total_pnl": oos_result.total_pnl},
+            "is_metrics": is_metrics,
+            "oos_metrics": oos_metrics,
+            "oos_is_sharpe_ratio": ratio,
         })
         if oos_result is not None:
             print(f"[wf] window {window.index} OOS pnl={oos_result.total_pnl:.2f} trades={oos_result.n_trades}")
@@ -228,6 +235,7 @@ def main() -> None:
         )
         if holdout.n_trades >= 2:
             mc_holdout = bootstrap_trades(holdout.trade_pnls, mc_cfg)
+    holdout_metrics = run_metrics(holdout, mc_cfg.initial_capital) if holdout else None
 
     wf_report = {
         "instrument_id": instrument_id,
@@ -244,8 +252,9 @@ def main() -> None:
         "stitched_oos_trades": len(stitched),
         "stitched_oos_pnl": sum(stitched),
         "mc_oos": mc_oos,
-        "holdout": None if holdout is None else {"n_trades": holdout.n_trades, "total_pnl": holdout.total_pnl},
+        "holdout": None if holdout is None else {"n_trades": holdout.n_trades, "total_pnl": holdout.total_pnl, "metrics": holdout_metrics},
         "mc_holdout": mc_holdout,
+        "robustness": robustness_summary(wf_windows),
     }
 
     report.write_reports(out_dir, wf_report, mc_report, summary)
