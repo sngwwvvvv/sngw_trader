@@ -64,7 +64,7 @@ def extract_equity_marks(cache, venue: str, window_start_ns: int) -> list[tuple[
         if ev.ts_init < window_start_ns or not ev.balances:
             continue
         # ponytail: 단일 자산 계정 가정. 복수 자산이면 최대 잔고 1개만 사용.
-        total = max(b.total.as_double() for b in ev.balances.values())
+        total = max(b.total.as_double() for b in ev.balances)
         marks.append((ev.ts_init, total))
     marks.sort(key=lambda m: m[0])
     return marks

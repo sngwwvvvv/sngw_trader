@@ -69,7 +69,7 @@ class _Bal:
 class _Ev:
     def __init__(self, ts: int, bal: float):
         self.ts_init = ts
-        self.balances = {"USDT": _Bal(bal)}
+        self.balances = [_Bal(bal)]
 
 
 class _Acc:
