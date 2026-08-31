@@ -35,7 +35,7 @@ src/sngw_trader/
   strategies/
     err_momentum_regime.py     # 수정: 4h 집계, 기본 파라미터, 1분 스톱 트랙(_trailing), 트레일링 스톱, 쿨다운(_target_4h/_tick_4h)
   indicators/
-    risk_metrics.py            # 수정: RealizedVol(lookback, periods_per_year) 파라미터화 (로직 무변경). 기본값 ppy=2190/lookback=120
+    risk_metrics.py            # 무변경 — RealizedVol(lookback, periods_per_year)은 이미 파라미터화됨. 전략이 ppy=2190/lookback=120 전달
     err_momentum.py            # 무변경 — ErrorAdjustedMomentum는 주기 무관 스트리밍
   research/
     param_scan.py              # 수정: Sharpe/MaxDD/평균 홀딩 리포트, WARMUP_DAYS 축소, 비용 배수 주입 (§4)
