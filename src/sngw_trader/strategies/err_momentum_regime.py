@@ -63,6 +63,7 @@ class ErrMomentumRegime(Strategy):
         self._pending_atr: float | None = None
         self._high_water: float | None = None
         self._low_water: float | None = None
+        self._cooldown_bars = 0
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -72,6 +73,13 @@ class ErrMomentumRegime(Strategy):
             self.close_all_positions(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
+        exited = False
+        side = self._current_side()
+        if self._trailing(side, bar.high.as_double(), bar.low.as_double()):
+            self.close_all_positions(self.config.instrument_id)
+            self._reset_stop()
+            self._cooldown_bars = self.config.reentry_cooldown_bars
+            exited = True
         daily = self._daily.update(
             int(bar.ts_init),
             bar.open.as_double(),
@@ -84,7 +92,8 @@ class ErrMomentumRegime(Strategy):
         self._ermom.update(daily.close)
         self._atr.update(daily.open, daily.high, daily.low, daily.close)
         self._vol.update(daily.close)
-        self._on_daily(daily)
+        if not exited:
+            self._on_bar_4h(daily)
 
     def on_event(self, event) -> None:
         if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
@@ -133,28 +142,27 @@ class ErrMomentumRegime(Strategy):
             self._stop_price = min(stop, self._low_water + self.config.atr_mult * atr)
         return False
 
-    def _check_stop(self, price: float) -> bool:
-        if self.config.risk_stop_enabled and is_stop_hit(self._current_side(), price, self._stop_price):
-            self.close_all_positions(self.config.instrument_id)
-            self._stop_price = None
-            return True
-        return False
+    def _tick_4h(self) -> None:
+        if self._cooldown_bars > 0:
+            self._cooldown_bars -= 1
 
-    def _on_daily(self, daily: CompletedBar) -> None:
-        current = self._current_side()
-        if current != 0 and self._check_stop(daily.close):
-            return  # re-entry next daily bar via normal regime rule
-        entry_blocked = (
+    def _target_4h(self, current: int) -> int:
+        entry_blocked = self._cooldown_bars > 0 or (
             self.config.vol_filter_enabled
             and self._vol.value is not None
             and self._vol.value > self.config.vol_threshold
         )
-        target = apply_entry_block(current, regime_target(self._ermom.value, self.config.theta), entry_blocked)
+        return apply_entry_block(current, regime_target(self._ermom.value, self.config.theta), entry_blocked)
+
+    def _on_bar_4h(self, daily: CompletedBar) -> None:
+        self._tick_4h()
+        current = self._current_side()
+        target = self._target_4h(current)
         if current == target:
             return
         if current != 0:
             self.close_all_positions(self.config.instrument_id)
-            self._stop_price = None
+            self._reset_stop()
         if target != 0:
             self._submit(OrderSide.BUY if target > 0 else OrderSide.SELL)
 
