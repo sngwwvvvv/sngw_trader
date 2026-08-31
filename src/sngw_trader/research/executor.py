@@ -60,7 +60,8 @@ def extract_equity_marks(cache, venue: str, window_start_ns: int) -> list[tuple[
     if account is None:
         return []
     marks: list[tuple[int, float]] = []
-    for ev in account.events():
+    events = account.events() if callable(account.events) else account.events
+    for ev in events:
         if ev.ts_init < window_start_ns or not ev.balances:
             continue
         # ponytail: 단일 자산 계정 가정. 복수 자산이면 최대 잔고 1개만 사용.
@@ -99,7 +100,10 @@ def run_window(
     try:
         node.run()
         window_start_ns = dt_to_unix_nanos(start)
-        result = extract_run_result(engine.cache.positions(), window_start_ns)
+        result = extract_run_result(
+            engine.cache.positions() + engine.cache.position_snapshots(),
+            window_start_ns,
+        )
         marks = extract_equity_marks(
             engine.cache, instrument_id.rsplit(".", 1)[-1], window_start_ns
         )
