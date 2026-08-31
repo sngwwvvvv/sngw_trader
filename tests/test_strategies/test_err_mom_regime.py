@@ -38,11 +38,12 @@ def test_config_builds():
     assert strategy.config.instrument_id.value.endswith(".OKX")
 
 
-def _make_strategy():
+def _make_strategy(**overrides):
     config = ErrMomentumRegimeConfig(
         instrument_id=InstrumentId.from_str("BTC-USDT-SWAP.OKX"),
         bar_type=BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
         trade_size=Decimal("0.01"),
+        **overrides,
     )
     return ErrMomentumRegime(config=config)
 
@@ -139,6 +140,22 @@ def test_vol_block_still_applies_without_cooldown():
     _feed_vol_high(s)
     assert s._target_4h(0) == 0
     assert s._target_4h(1) == 1  # blocked only blocks NEW entries
+
+
+def test_allow_short_default_keeps_short():
+    s = _make_strategy()
+    s._ermom._value = -0.5
+    assert s._target_4h(0) == -1
+
+
+def test_allow_short_false_maps_short_regime_to_flat():
+    s = _make_strategy(allow_short=False)
+    s._ermom._value = -0.5
+    assert s._target_4h(0) == 0
+    assert s._target_4h(-1) == 0  # held short -> close to flat
+    s._ermom._value = 0.5
+    assert s._target_4h(0) == 1  # long unaffected
+    assert s._target_4h(1) == 1
 
 
 def test_cooldown_decrements_per_4h_close():

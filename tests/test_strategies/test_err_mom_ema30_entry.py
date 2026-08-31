@@ -1,7 +1,10 @@
 from decimal import Decimal
+from unittest.mock import PropertyMock, patch
 
 from nautilus_trader.model import BarType, InstrumentId
+from nautilus_trader.model.enums import OrderSide
 
+from sngw_trader.indicators.bar_aggregator import CompletedBar
 from sngw_trader.strategies.err_mom_ema30_entry import (
     ErrMomEma30Entry,
     ErrMomEma30EntryConfig,
@@ -12,11 +15,12 @@ from sngw_trader.strategies.err_mom_ema30_entry import (
 EF, ES = 105.0, 100.0
 
 
-def _make_strategy():
+def _make_strategy(**overrides):
     config = ErrMomEma30EntryConfig(
         instrument_id=InstrumentId.from_str("BTC-USDT-SWAP.OKX"),
         bar_type=BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
         trade_size=Decimal("0.01"),
+        **overrides,
     )
     return ErrMomEma30Entry(config=config)
 
@@ -117,3 +121,26 @@ def test_config_builds():
     strategy = ErrMomEma30Entry(config=config)
     assert strategy.config.n_pull == 24
     assert strategy.config.ema_fast < strategy.config.ema_slow
+
+
+# IDLE->EXT->PULL->TRIG short sequence with ema_fast=98, ema_slow=100 seeded.
+_SHORT_BARS = (
+    (98.0, 99.0, 96.0, 97.0),  # EXT
+    (98.5, 98.5, 97.5, 98.0),  # PULL (high in [ema_fast, ema_slow])
+    (98.0, 98.5, 96.5, 97.0),  # TRIG
+)
+
+
+def test_allow_short_grid():
+    for allow_short, expected in ((False, []), (True, [OrderSide.SELL])):
+        s = _make_strategy(allow_short=allow_short)
+        s._ermom._value = -0.5
+        s._ema_fast._value = 98.0
+        s._ema_slow._value = 100.0
+        calls = []
+        with patch.object(type(s), "portfolio", new_callable=PropertyMock) as pf, \
+                patch.object(s, "_submit", side_effect=lambda side: calls.append(side)):
+            pf.return_value.is_flat.return_value = True
+            for o, h, l, c in _SHORT_BARS:
+                s._on_entry(CompletedBar(ts_open_ns=0, ts_close_ns=1, open=o, high=h, low=l, close=c))
+        assert calls == expected

@@ -1,4 +1,4 @@
-"""Spec B: daily ERMOM regime permission + 30m EMA20/50 band-reentry entry.
+﻿"""Spec B: daily ERMOM regime permission + LTF (entry_tf_minutes) EMA20/50 band-reentry entry.
 
 Strategy logic only. Do not import TradingNode or OKX factories here.
 """
@@ -32,9 +32,11 @@ class ErrMomEma30EntryConfig(StrategyConfig, frozen=True):
     w_e: int = 10
     momentum_window: int = 200
     theta: float = 0.0
+    allow_short: bool = True
     ema_fast: int = 20
     ema_slow: int = 50
     n_pull: int = 24
+    entry_tf_minutes: int = 30
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
@@ -120,7 +122,7 @@ class ErrMomEma30Entry(Strategy):
     def __init__(self, config: ErrMomEma30EntryConfig) -> None:
         super().__init__(config)
         self._daily = BarAggregator(86_400)
-        self._m30 = BarAggregator(1_800)
+        self._entry = BarAggregator(config.entry_tf_minutes * 60)
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
         self._vol = RealizedVol(config.vol_lookback)
@@ -147,9 +149,9 @@ class ErrMomEma30Entry(Strategy):
             self._ermom.update(daily.close)
             self._atr.update(daily.open, daily.high, daily.low, daily.close)
             self._vol.update(daily.close)
-        m30 = self._m30.update(ts, o, h, l, c)
-        if m30 is not None:
-            self._on_30m(m30)
+        entry = self._entry.update(ts, o, h, l, c)
+        if entry is not None:
+            self._on_entry(entry)
 
     def _prepare_machine(self, regime: int) -> RibbonEntryMachine:
         """Select the active direction machine, resetting both on sign flip.
@@ -164,18 +166,20 @@ class ErrMomEma30Entry(Strategy):
             self._active_direction = active
         return self._long if active > 0 else self._short
 
-    def _on_30m(self, bar30: CompletedBar) -> None:
-        ema_f = self._ema_fast.update(bar30.close)
-        ema_s = self._ema_slow.update(bar30.close)
+    def _on_entry(self, entry_bar: CompletedBar) -> None:
+        ema_f = self._ema_fast.update(entry_bar.close)
+        ema_s = self._ema_slow.update(entry_bar.close)
         regime = regime_target(self._ermom.value, self.config.theta)
+        if not self.config.allow_short and regime < 0:
+            regime = 0
 
         if not self.portfolio.is_flat(self.config.instrument_id):
             side = 1 if self.portfolio.is_net_long(self.config.instrument_id) else -1
-            if self.config.risk_stop_enabled and is_stop_hit(side, bar30.close, self._stop_price):
+            if self.config.risk_stop_enabled and is_stop_hit(side, entry_bar.close, self._stop_price):
                 self.close_all_positions(self.config.instrument_id)
                 self._stop_price = None
                 return
-            if ema_f is not None and ema_s is not None and should_exit(side, regime, bar30.close, ema_f, ema_s):
+            if ema_f is not None and ema_s is not None and should_exit(side, regime, entry_bar.close, ema_f, ema_s):
                 self.close_all_positions(self.config.instrument_id)
                 self._stop_price = None
                 self._long.reset()
@@ -193,7 +197,7 @@ class ErrMomEma30Entry(Strategy):
 
         machine = self._prepare_machine(regime)
         if machine.update(
-            o=bar30.open, h=bar30.high, l=bar30.low, c=bar30.close,
+            o=entry_bar.open, h=entry_bar.high, l=entry_bar.low, c=entry_bar.close,
             ema_fast=ema_f, ema_slow=ema_s, regime_allows=True,
         ):
             self._submit(OrderSide.BUY if regime > 0 else OrderSide.SELL)

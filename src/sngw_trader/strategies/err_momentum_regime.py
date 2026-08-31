@@ -31,6 +31,7 @@ class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
     w_e: int = 5
     momentum_window: int = 48
     theta: float = 0.0
+    allow_short: bool = True
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
@@ -152,7 +153,10 @@ class ErrMomentumRegime(Strategy):
             and self._vol.value is not None
             and self._vol.value > self.config.vol_threshold
         )
-        return apply_entry_block(current, regime_target(self._ermom.value, self.config.theta), entry_blocked)
+        target = regime_target(self._ermom.value, self.config.theta)
+        if not self.config.allow_short and target < 0:
+            target = 0
+        return apply_entry_block(current, target, entry_blocked)
 
     def _on_bar_4h(self, daily: CompletedBar) -> None:
         self._tick_4h()
