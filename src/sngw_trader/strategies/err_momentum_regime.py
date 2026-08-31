@@ -61,6 +61,8 @@ class ErrMomentumRegime(Strategy):
         self._vol = RealizedVol(config.vol_lookback, periods_per_year=2190)
         self._stop_price: float | None = None
         self._pending_atr: float | None = None
+        self._high_water: float | None = None
+        self._low_water: float | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -87,12 +89,7 @@ class ErrMomentumRegime(Strategy):
     def on_event(self, event) -> None:
         if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
             return
-        side = self._current_side()
-        if side == 0:
-            self._stop_price = None
-        elif self._pending_atr is not None:
-            self._stop_price = stop_price(side, event.last_px.as_double(), self._pending_atr, self.config.atr_mult)
-            self._pending_atr = None
+        self._on_fill(self._current_side(), event.last_px.as_double())
 
     def _current_side(self) -> int:
         if self.portfolio.is_net_long(self.config.instrument_id):
@@ -100,6 +97,41 @@ class ErrMomentumRegime(Strategy):
         if self.portfolio.is_net_short(self.config.instrument_id):
             return -1
         return 0
+
+    def _reset_stop(self) -> None:
+        self._stop_price = None
+        self._high_water = None
+        self._low_water = None
+
+    def _on_fill(self, side: int, fill_px: float) -> None:
+        """Seed stop/watermark only on the 0->+/-1 transition (partial fills skip)."""
+        if side == 0:
+            self._reset_stop()
+        elif self._pending_atr is not None:
+            self._stop_price = stop_price(side, fill_px, self._pending_atr, self.config.atr_mult)
+            if side > 0:
+                self._high_water = fill_px
+            else:
+                self._low_water = fill_px
+            self._pending_atr = None
+
+    def _trailing(self, side: int, high: float, low: float) -> bool:
+        """1m track: hit-check FIRST (vs prior stop), then watermark, then stop recalc."""
+        stop = self._stop_price
+        if not self.config.risk_stop_enabled or side == 0 or stop is None:
+            return False
+        if is_stop_hit(side, low if side > 0 else high, stop):
+            return True
+        atr = self._atr.value
+        if atr is None:
+            return False
+        if side > 0:
+            self._high_water = max(self._high_water, high)
+            self._stop_price = max(stop, self._high_water - self.config.atr_mult * atr)
+        else:
+            self._low_water = min(self._low_water, low)
+            self._stop_price = min(stop, self._low_water + self.config.atr_mult * atr)
+        return False
 
     def _check_stop(self, price: float) -> bool:
         if self.config.risk_stop_enabled and is_stop_hit(self._current_side(), price, self._stop_price):
