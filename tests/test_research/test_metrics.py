@@ -1,6 +1,10 @@
 import pytest
 
-from sngw_trader.research.metrics import compute_trade_metrics, compute_equity_metrics
+from sngw_trader.research.metrics import (
+    NS_PER_YEAR,
+    compute_trade_metrics,
+    compute_equity_metrics,
+)
 
 
 def test_trade_metrics_values():
@@ -32,7 +36,7 @@ def test_trade_metrics_no_wins():
     assert m["max_consecutive_losses"] == 2
 
 
-NS = 1_000_000_000
+NS = NS_PER_YEAR
 
 
 def test_equity_metrics_values():
@@ -45,8 +49,8 @@ def test_equity_metrics_values():
     ]
     m = compute_equity_metrics(marks, 100.0)
     assert m["mdd_ratio"] == pytest.approx(0.25)
-    assert m["mdd_duration"] == pytest.approx(3.0)
-    assert m["recovery_duration"] == pytest.approx(2.0)
+    assert m["mdd_duration"] == pytest.approx(3 * NS / 1e9)
+    assert m["recovery_duration"] == pytest.approx(2 * NS / 1e9)
     assert m["underwater_mean"] == pytest.approx((0.0 + 0.0 - 0.25 - 1 / 6 + 0.0) / 5)
     assert m["sortino"] == pytest.approx(0.0902777 / 0.125, rel=1e-3)
     assert m["tail_ratio"] > 1.0

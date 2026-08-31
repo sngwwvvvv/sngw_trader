@@ -77,9 +77,8 @@ def compute_equity_metrics(
         (ts[worst[2]] - ts[worst[1]]) / 1e9 if worst is not None and worst[3] else None
     )
 
-    # ponytail: per-period annualization (years = #mark periods) matches the pinned
-    # tests; real-time span/NS_PER_YEAR overflows for sub-year spans. Revisit for live data.
-    years = len(marks) - 1
+    span_ns = float(ts[-1] - ts[0])
+    years = span_ns / NS_PER_YEAR
     annualized_return = (
         (float(eq[-1]) / initial_capital) ** (1.0 / years) - 1.0
         if years > 0 and initial_capital > 0 else None
