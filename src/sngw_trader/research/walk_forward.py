@@ -207,13 +207,17 @@ def main() -> None:
         wf_windows.append({
             "index": window.index,
             "is": {"start": window.is_start.isoformat(), "end": window.is_end.isoformat()},
-            "oos": {"start": window.oos_start.isoformat(), "end": window.oos_end.isoformat()},
+            "oos": {
+                "start": window.oos_start.isoformat(),
+                "end": window.oos_end.isoformat(),
+                "n_trades": oos_result.n_trades if oos_result else None,
+                "total_pnl": oos_result.total_pnl if oos_result else None,
+            },
             "selected": _params_for(spec, best) if best is not None else None,
             "grid": [
                 {"params": _params_for(spec, k), "sharpe": sharpes[k], "n_trades": grid_results[k].n_trades}
                 for k in grid_results
             ],
-            "oos": None if oos_result is None else {"n_trades": oos_result.n_trades, "total_pnl": oos_result.total_pnl},
             "is_metrics": is_metrics,
             "oos_metrics": oos_metrics,
             "oos_is_sharpe_ratio": ratio,
