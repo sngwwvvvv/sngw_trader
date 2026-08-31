@@ -1,0 +1,12 @@
+{
+  "strategy_path": "sngw_trader.strategies.err_momentum_regime:ErrMomentumRegime",
+  "config_path": "sngw_trader.strategies.err_momentum_regime:ErrMomentumRegimeConfig",
+  "fixed": {
+    "trade_size": "0.01"
+  },
+  "grid": {
+    "momentum_window": [48, 144, 288],
+    "atr_mult": [2.5, 3.0, 4.0],
+    "vol_threshold": [0.7, 0.8]
+  }
+}

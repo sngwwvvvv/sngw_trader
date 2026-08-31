@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from nautilus_trader.core.datetime import dt_to_unix_nanos
 from nautilus_trader.model.data import Bar
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
@@ -26,6 +28,29 @@ DEFAULT_GRID = GridSpec(
     fixed={"trade_size": "0.01"},
     grid={"fast_ema_period": [10, 20, 30], "slow_ema_period": [20, 50, 100]},
 )
+
+DAY_NS = 86_400_000_000_000
+
+
+def load_daily_closes() -> list[tuple[int, float]]:
+    """[(ts_ns, close)] daily closes from the 1m catalog (last write wins per day)."""
+    from sngw_trader.research.signal_probe import load_daily_closes as _probe_load
+
+    return [(day * DAY_NS, close) for day, close in _probe_load()]
+
+
+def bh_metrics(
+    days: list[tuple[int, float]], start: datetime, end: datetime
+) -> dict | None:
+    """Buy&hold total return + annualized daily-return Sharpe over [start, end)."""
+    px = [c for ts, c in days if dt_to_unix_nanos(start) <= ts < dt_to_unix_nanos(end)]
+    if len(px) < 3:
+        return None
+    rets = [px[i + 1] / px[i] - 1 for i in range(len(px) - 1)]
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    sharpe = mean / math.sqrt(var) * math.sqrt(365) if var > 0 else 0.0
+    return {"total_return": px[-1] / px[0] - 1, "sharpe_ann": sharpe, "n_days": len(rets)}
 
 
 def load_grid() -> GridSpec:
@@ -175,6 +200,7 @@ def main() -> None:
     h_start = holdout_start(data_end, wf_cfg.holdout_months)
     print(f"[wf] data {data_start:%Y-%m-%d}..{data_end:%Y-%m-%d} "
           f"holdout from {h_start:%Y-%m-%d}, {len(windows)} windows")
+    days = load_daily_closes()
 
     strategy_name = spec.strategy_path.rsplit(":", 1)[-1]
     out_dir = report.run_dir(strategy_name)
@@ -220,6 +246,7 @@ def main() -> None:
             ],
             "is_metrics": is_metrics,
             "oos_metrics": oos_metrics,
+            "oos_benchmark": bh_metrics(days, window.oos_start, window.oos_end),
             "oos_is_sharpe_ratio": ratio,
         })
         if oos_result is not None:
@@ -255,6 +282,8 @@ def main() -> None:
         "n_windows": len(windows),
         "stitched_oos_trades": len(stitched),
         "stitched_oos_pnl": sum(stitched),
+        "oos_benchmark": bh_metrics(days, data_start, h_start),
+        "holdout_benchmark": bh_metrics(days, h_start, data_end),
         "mc_oos": mc_oos,
         "holdout": None if holdout is None else {"n_trades": holdout.n_trades, "total_pnl": holdout.total_pnl, "metrics": holdout_metrics},
         "mc_holdout": mc_holdout,

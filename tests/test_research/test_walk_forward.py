@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,6 +9,8 @@ from sngw_trader.research.executor import RunResult
 from sngw_trader.research.metrics import NS_PER_YEAR
 from sngw_trader.research.select import sharpe_from_trades
 from sngw_trader.research.walk_forward import (
+    DAY_NS,
+    bh_metrics,
     build_wf_configs,
     load_grid,
     oos_is_sharpe_ratio,
@@ -180,6 +183,48 @@ def test_main_wires_metrics_into_reports(monkeypatch, tmp_path):
 
     assert mc_report == {"oos": {"sims": 1000}, "holdout": {"sims": 1000}}
     assert summary["mc_holdout"] == {"sims": 1000}
+
+
+def test_bh_metrics_total_return_and_sharpe():
+    days = [(i * DAY_NS, 100.0 + i) for i in range(11)]
+    m = bh_metrics(days, datetime(1970, 1, 1, tzinfo=timezone.utc),
+                   datetime(1970, 1, 11, tzinfo=timezone.utc))
+    assert m["total_return"] == pytest.approx(0.09)  # [start, end): closes 100..109
+    assert m["n_days"] == 9
+    assert m["sharpe_ann"] > 0
+
+
+def test_bh_metrics_zero_variance_sharpe_is_zero():
+    days = [(i * DAY_NS, 100.0) for i in range(5)]
+    m = bh_metrics(days, datetime(1970, 1, 1, tzinfo=timezone.utc),
+                   datetime(1970, 1, 5, tzinfo=timezone.utc))
+    assert m["total_return"] == pytest.approx(0.0)
+    assert m["sharpe_ann"] == 0.0
+
+
+def test_bh_metrics_insufficient_days_is_none():
+    days = [(i * DAY_NS, 100.0) for i in range(2)]
+    assert bh_metrics(days, datetime(1970, 1, 1, tzinfo=timezone.utc),
+                      datetime(1970, 1, 2, tzinfo=timezone.utc)) is None
+
+
+def test_main_includes_bh_benchmarks(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    _wf_env(monkeypatch)
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    fake_days = [((start + timedelta(days=i)).timestamp() * 1e9, 100.0 + i)
+                 for i in range(183)]
+    monkeypatch.setattr(wf, "load_daily_closes", lambda: fake_days)
+    wf_report, mc_report, summary = _run_main(monkeypatch, tmp_path)
+
+    for w in wf_report["windows"]:
+        assert w["oos_benchmark"] is not None
+        assert w["oos_benchmark"]["n_days"] > 0
+    assert summary["oos_benchmark"] is not None
+    assert summary["holdout_benchmark"] is not None
+    # +1/day over the stitched OOS span (data_start..holdout_start)
+    assert summary["oos_benchmark"]["total_return"] > 0
 
 
 def test_main_no_eligible_combo_yields_null_metrics(monkeypatch, tmp_path):

@@ -1,0 +1,9 @@
+{
+  "strategy_path": "sngw_trader.strategies.err_mom_ema30_entry:ErrMomEma30Entry",
+  "config_path": "sngw_trader.strategies.err_mom_ema30_entry:ErrMomEma30EntryConfig",
+  "fixed": {"trade_size": "0.01"},
+  "grid": {
+    "entry_tf_minutes": [30, 60, 120, 240],
+    "allow_short": [true, false]
+  }
+}
