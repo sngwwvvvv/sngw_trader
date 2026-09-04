@@ -10,11 +10,9 @@
     "ema_fast": 20,
     "ema_slow": 50,
     "n_pull": 24,
-    "atr_mult": 3.0,
-    "vol_threshold": 0.8
+    "atr_mult": 3.0
   },
   "grid": {
-    "entry_tf_minutes": [30, 60, 120, 240],
-    "vol_filter_enabled": [true, false]
+    "entry_tf_minutes": [30, 60, 120, 240]
   }
 }

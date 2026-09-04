@@ -30,9 +30,10 @@ def test_config_builds():
     assert strategy.config.w_f == 5
     assert strategy.config.w_e == 5
     assert strategy.config.momentum_window == 48
-    assert strategy.config.vol_lookback == 120
     assert strategy.config.reentry_cooldown_bars == 1
-    assert strategy._vol._ppy == 2190  # 4h returns annualization
+    assert strategy.config.sizing_mode == "vol_target"
+    assert strategy._sizer.scale() is None
+    assert strategy._utc_day._bucket_ns == 86_400 * 1_000_000_000
     assert strategy._daily._bucket_ns == 14_400 * 1_000_000_000  # 4h aggregation
     assert strategy._ermom.warmup_bars == 58  # spec: warm-up 58 x 4h bars
     assert strategy.config.instrument_id.value.endswith(".OKX")
@@ -117,14 +118,6 @@ def test_close_fill_resets_stop_state():
 _4H_BAR = CompletedBar(ts_open_ns=0, ts_close_ns=1, open=1.0, high=1.0, low=1.0, close=1.0)
 
 
-def _feed_vol_high(s):
-    px = 100.0
-    for i in range(s.config.vol_lookback + 1):
-        px *= 1.02 if i % 2 else 0.98
-        s._vol.update(px)
-    assert s._vol.value > s.config.vol_threshold
-
-
 def test_cooldown_blocks_then_releases():
     s = _make_strategy()
     s._ermom._value = 0.5  # regime long
@@ -132,14 +125,6 @@ def test_cooldown_blocks_then_releases():
     assert s._target_4h(0) == 0  # blocked
     s._cooldown_bars = 0
     assert s._target_4h(0) == 1  # released
-
-
-def test_vol_block_still_applies_without_cooldown():
-    s = _make_strategy()
-    s._ermom._value = 0.5
-    _feed_vol_high(s)
-    assert s._target_4h(0) == 0
-    assert s._target_4h(1) == 1  # blocked only blocks NEW entries
 
 
 def test_allow_short_default_keeps_short():
@@ -156,6 +141,35 @@ def test_allow_short_false_maps_short_regime_to_flat():
     s._ermom._value = 0.5
     assert s._target_4h(0) == 1  # long unaffected
     assert s._target_4h(1) == 1
+
+
+def test_fixed_mode_desired_is_trade_size():
+    s = _make_strategy(sizing_mode="fixed")
+    assert s._sizer.desired_qty(1, s.config.trade_size) == Decimal("0.01")
+
+
+def test_sync_skips_when_warming_and_flat():
+    s = _make_strategy()
+    s._signed_qty = lambda: Decimal("0")
+    calls = []
+    s._submit = lambda *a, **k: calls.append((a, k))
+    s._sync_size(1, allow_new=True, allow_resize=False)
+    assert calls == []
+
+
+def test_band_resize_keeps_stop():
+    from nautilus_trader.model.enums import OrderSide
+
+    s = _make_strategy(sizing_mode="fixed")
+    s._stop_price = 94.0
+    s._signed_qty = lambda: Decimal("0.010")
+    s._sizer.desired_qty = lambda d, u: Decimal("0.013")
+    submitted = []
+    s._submit = lambda side, qty, seed_stop: submitted.append((side, qty, seed_stop))
+    s.close_all_positions = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no flatten"))
+    s._sync_size(1, allow_new=False, allow_resize=True)
+    assert submitted == [(OrderSide.BUY, Decimal("0.003"), False)]
+    assert s._stop_price == 94.0
 
 
 def test_cooldown_decrements_per_4h_close():

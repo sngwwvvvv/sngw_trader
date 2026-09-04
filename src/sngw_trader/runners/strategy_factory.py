@@ -30,9 +30,12 @@ def build_err_mom_a(settings: Settings) -> Strategy:
             risk_stop_enabled=s.risk_stop_enabled,
             atr_period=s.atr_period,
             atr_mult=s.atr_mult,
-            vol_filter_enabled=s.vol_filter_enabled,
-            vol_lookback=s.vol_lookback,
-            vol_threshold=s.vol_threshold,
+            sizing_mode=s.sizing_mode,
+            size_target_vol=s.size_target_vol,
+            size_half_life=s.size_half_life,
+            size_min_scale=s.size_min_scale,
+            size_max_scale=s.size_max_scale,
+            size_rebalance_band=s.size_rebalance_band,
         )
     )
 
@@ -54,9 +57,12 @@ def build_err_mom_b(settings: Settings) -> Strategy:
             risk_stop_enabled=s.risk_stop_enabled,
             atr_period=s.atr_period,
             atr_mult=s.atr_mult,
-            vol_filter_enabled=s.vol_filter_enabled,
-            vol_lookback=s.vol_lookback,
-            vol_threshold=s.vol_threshold,
+            sizing_mode=s.sizing_mode,
+            size_target_vol=s.size_target_vol,
+            size_half_life=s.size_half_life,
+            size_min_scale=s.size_min_scale,
+            size_max_scale=s.size_max_scale,
+            size_rebalance_band=s.size_rebalance_band,
         )
     )
 

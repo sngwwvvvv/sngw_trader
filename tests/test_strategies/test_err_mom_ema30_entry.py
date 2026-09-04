@@ -133,14 +133,46 @@ _SHORT_BARS = (
 
 def test_allow_short_grid():
     for allow_short, expected in ((False, []), (True, [OrderSide.SELL])):
-        s = _make_strategy(allow_short=allow_short)
+        s = _make_strategy(allow_short=allow_short, sizing_mode="fixed")
         s._ermom._value = -0.5
         s._ema_fast._value = 98.0
         s._ema_slow._value = 100.0
         calls = []
         with patch.object(type(s), "portfolio", new_callable=PropertyMock) as pf, \
-                patch.object(s, "_submit", side_effect=lambda side: calls.append(side)):
+                patch.object(s, "_submit", side_effect=lambda side, qty=None, seed_stop=True: calls.append(side)):
             pf.return_value.is_flat.return_value = True
+            pf.return_value.net_position.return_value = Decimal("0")
+            pf.return_value.is_net_long.return_value = False
+            pf.return_value.is_net_short.return_value = False
             for o, h, l, c in _SHORT_BARS:
                 s._on_entry(CompletedBar(ts_open_ns=0, ts_close_ns=1, open=o, high=h, low=l, close=c))
         assert calls == expected
+
+
+def test_trig_uses_desired_qty_when_fixed():
+    s = _make_strategy(sizing_mode="fixed")
+    s._ermom._value = 0.5
+    s._ema_fast._value = 105.0
+    s._ema_slow._value = 100.0
+    qtys = []
+    bars = (
+        (106, 111, 105, 110),
+        (110, 110, 104, 108),
+        (106, 110, 104.5, 106),
+    )
+    with patch.object(type(s), "portfolio", new_callable=PropertyMock) as pf:
+        pf.return_value.is_flat.return_value = True
+        pf.return_value.net_position.return_value = Decimal("0")
+        s._submit = lambda side, qty, seed_stop=True: qtys.append(qty)
+        for o, h, l, c in bars:
+            s._on_entry(CompletedBar(0, 1, o, h, l, c))
+    assert qtys == [Decimal("0.01")]
+
+
+def test_daily_resize_does_not_enter_when_flat():
+    s = _make_strategy(sizing_mode="fixed")
+    s._signed_qty = lambda: Decimal("0")
+    calls = []
+    s._submit = lambda *a, **k: calls.append(1)
+    s._sync_size(1, allow_new=False, allow_resize=True)
+    assert calls == []

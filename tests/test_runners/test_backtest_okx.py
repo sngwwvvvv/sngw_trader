@@ -16,7 +16,8 @@ def _settings() -> Settings:
         strategy="err_mom_a", w_f=10, w_e=10, momentum_window=200, theta=0.0,
         ema_fast=20, ema_slow=50, n_pull=24, trade_size="0.01",
         risk_stop_enabled=True, atr_period=14, atr_mult=3.0,
-        vol_filter_enabled=True, vol_lookback=20, vol_threshold=0.80,
+        sizing_mode="vol_target", size_target_vol=0.20, size_half_life=20,
+        size_min_scale=0.0, size_max_scale=3.0, size_rebalance_band=0.10,
         catalog_start=datetime(2026, 1, 1), catalog_end=datetime(2026, 3, 1),
     )
 

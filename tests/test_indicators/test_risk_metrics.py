@@ -3,7 +3,6 @@ import math
 from sngw_trader.indicators.risk_metrics import (
     DailyAtr,
     Ema,
-    RealizedVol,
     is_stop_hit,
     stop_price,
 )
@@ -37,31 +36,6 @@ def test_atr_constant_range():
         v = atr.update(100, 101, 99, 100)
     assert v is not None
     assert math.isclose(v, 2.0)
-
-
-def test_realized_vol_zero_for_flat():
-    vol = RealizedVol(lookback=5)
-    result = None
-    for _ in range(30):
-        result = vol.update(100.0)
-    assert result == 0.0
-
-
-def test_realized_vol_valid_after_warmup():
-    vol = RealizedVol(lookback=5)
-    for i in range(6):
-        v = vol.update(100.0 + i)
-    assert v is not None and v > 0
-
-
-def test_realized_vol_periods_per_year_scaling():
-    v365 = RealizedVol(lookback=5)
-    v4h = RealizedVol(lookback=5, periods_per_year=2190)
-    for i in range(1, 8):
-        px = 100.0 * (1 + (0.01 if i % 2 else -0.01))
-        v365.update(px)
-        v4h.update(px)
-    assert math.isclose(v4h.value / v365.value, math.sqrt(2190 / 365), rel_tol=1e-9)
 
 
 def test_stop_helpers():

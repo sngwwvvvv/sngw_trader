@@ -15,12 +15,8 @@ from nautilus_trader.trading import Strategy
 
 from sngw_trader.indicators.bar_aggregator import BarAggregator, CompletedBar
 from sngw_trader.indicators.err_momentum import ErrorAdjustedMomentum, regime_target
-from sngw_trader.indicators.risk_metrics import (
-    DailyAtr,
-    RealizedVol,
-    is_stop_hit,
-    stop_price,
-)
+from sngw_trader.indicators.risk_metrics import DailyAtr, is_stop_hit, stop_price
+from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
 
 
 class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
@@ -35,9 +31,12 @@ class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
-    vol_filter_enabled: bool = True
-    vol_lookback: int = 120
-    vol_threshold: float = 0.80
+    sizing_mode: str = "vol_target"
+    size_target_vol: float = 0.20
+    size_half_life: int = 20
+    size_min_scale: float = 0.0
+    size_max_scale: float = 3.0
+    size_rebalance_band: float = 0.10
     reentry_cooldown_bars: int = 1
     close_positions_on_stop: bool = True
 
@@ -57,14 +56,26 @@ class ErrMomentumRegime(Strategy):
     def __init__(self, config: ErrMomentumRegimeConfig) -> None:
         super().__init__(config)
         self._daily = BarAggregator(14_400)
+        self._utc_day = BarAggregator(86_400)
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
-        self._vol = RealizedVol(config.vol_lookback, periods_per_year=2190)
+        self._sizer = VolTargetSizer(
+            VolTargetConfig(
+                target_vol=config.size_target_vol,
+                half_life=config.size_half_life,
+                min_scale=config.size_min_scale,
+                max_scale=config.size_max_scale,
+                rebalance_band=config.size_rebalance_band,
+                periods_per_year=365,
+                mode=config.sizing_mode,
+            )
+        )
         self._stop_price: float | None = None
         self._pending_atr: float | None = None
         self._high_water: float | None = None
         self._low_water: float | None = None
         self._cooldown_bars = 0
+        self._sized_this_bar = False
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -74,6 +85,7 @@ class ErrMomentumRegime(Strategy):
             self.close_all_positions(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
+        self._sized_this_bar = False
         exited = False
         side = self._current_side()
         if self._trailing(side, bar.high.as_double(), bar.low.as_double()):
@@ -81,20 +93,22 @@ class ErrMomentumRegime(Strategy):
             self._reset_stop()
             self._cooldown_bars = self.config.reentry_cooldown_bars
             exited = True
-        daily = self._daily.update(
-            int(bar.ts_init),
-            bar.open.as_double(),
-            bar.high.as_double(),
-            bar.low.as_double(),
-            bar.close.as_double(),
-        )
-        if daily is None:
-            return
-        self._ermom.update(daily.close)
-        self._atr.update(daily.open, daily.high, daily.low, daily.close)
-        self._vol.update(daily.close)
-        if not exited:
-            self._on_bar_4h(daily)
+            self._sized_this_bar = True
+        ts = int(bar.ts_init)
+        o, h, l, c = bar.open.as_double(), bar.high.as_double(), bar.low.as_double(), bar.close.as_double()
+        utc_day = self._utc_day.update(ts, o, h, l, c)
+        if utc_day is not None:
+            self._sizer.update(utc_day.close)
+        fourh = self._daily.update(ts, o, h, l, c)
+        if fourh is not None:
+            self._ermom.update(fourh.close)
+            self._atr.update(fourh.open, fourh.high, fourh.low, fourh.close)
+            if not exited:
+                self._on_bar_4h(fourh)
+        if utc_day is not None and not self._sized_this_bar and not exited:
+            hold = self._current_side()
+            if hold != 0:
+                self._sync_size(hold, allow_new=False, allow_resize=True)
 
     def on_event(self, event) -> None:
         if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
@@ -107,6 +121,9 @@ class ErrMomentumRegime(Strategy):
         if self.portfolio.is_net_short(self.config.instrument_id):
             return -1
         return 0
+
+    def _signed_qty(self) -> Decimal:
+        return Decimal(str(self.portfolio.net_position(self.config.instrument_id)))
 
     def _reset_stop(self) -> None:
         self._stop_price = None
@@ -148,11 +165,7 @@ class ErrMomentumRegime(Strategy):
             self._cooldown_bars -= 1
 
     def _target_4h(self, current: int) -> int:
-        entry_blocked = self._cooldown_bars > 0 or (
-            self.config.vol_filter_enabled
-            and self._vol.value is not None
-            and self._vol.value > self.config.vol_threshold
-        )
+        entry_blocked = self._cooldown_bars > 0
         target = regime_target(self._ermom.value, self.config.theta)
         if not self.config.allow_short and target < 0:
             target = 0
@@ -162,24 +175,50 @@ class ErrMomentumRegime(Strategy):
         self._tick_4h()
         current = self._current_side()
         target = self._target_4h(current)
-        if current == target:
+        self._sync_size(target, allow_new=True, allow_resize=False)
+
+    def _sync_size(self, direction: int, *, allow_new: bool, allow_resize: bool) -> None:
+        desired = self._sizer.desired_qty(direction, self.config.trade_size)
+        current = self._signed_qty()
+        if desired is None:
             return
-        if current != 0:
+        if current == 0 and desired != 0 and not allow_new:
+            return
+        same_sign = current != 0 and desired != 0 and (current > 0) == (desired > 0)
+        if same_sign and not allow_resize:
+            return
+        if not self._sizer.should_rebalance(current, desired):
+            return
+        if current != 0 and (desired == 0 or (current > 0) != (desired > 0)):
             self.close_all_positions(self.config.instrument_id)
             self._reset_stop()
-        if target != 0:
-            self._submit(OrderSide.BUY if target > 0 else OrderSide.SELL)
+            self._sized_this_bar = True
+            current = Decimal("0")
+            if desired == 0:
+                return
+        if current == 0 and desired != 0:
+            self._submit(OrderSide.BUY if desired > 0 else OrderSide.SELL, abs(desired), seed_stop=True)
+            return
+        delta = desired - current
+        if delta == 0:
+            return
+        self._submit(OrderSide.BUY if delta > 0 else OrderSide.SELL, abs(delta), seed_stop=False)
 
-    def _submit(self, side: OrderSide) -> None:
+    def _submit(self, side: OrderSide, qty: Decimal, seed_stop: bool) -> None:
         instrument = self.cache.instrument(self.config.instrument_id)
         if instrument is None:
             self.log.error(f"Instrument not in cache: {self.config.instrument_id}")
             return
-        self._pending_atr = self._atr.value
+        q = instrument.make_qty(qty)
+        if q == 0:
+            return
+        if seed_stop:
+            self._pending_atr = self._atr.value
+        self._sized_this_bar = True
         self.submit_order(
             self.order_factory.market(
                 self.config.instrument_id,
                 side,
-                instrument.make_qty(self.config.trade_size),
+                q,
             )
         )

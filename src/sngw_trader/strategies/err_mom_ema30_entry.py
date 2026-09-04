@@ -15,13 +15,8 @@ from nautilus_trader.trading import Strategy
 
 from sngw_trader.indicators.bar_aggregator import BarAggregator, CompletedBar
 from sngw_trader.indicators.err_momentum import ErrorAdjustedMomentum, regime_target
-from sngw_trader.indicators.risk_metrics import (
-    DailyAtr,
-    Ema,
-    RealizedVol,
-    is_stop_hit,
-    stop_price,
-)
+from sngw_trader.indicators.risk_metrics import DailyAtr, Ema, is_stop_hit, stop_price
+from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
 
 
 class ErrMomEma30EntryConfig(StrategyConfig, frozen=True):
@@ -40,9 +35,12 @@ class ErrMomEma30EntryConfig(StrategyConfig, frozen=True):
     risk_stop_enabled: bool = True
     atr_period: int = 14
     atr_mult: float = 3.0
-    vol_filter_enabled: bool = True
-    vol_lookback: int = 20
-    vol_threshold: float = 0.80
+    sizing_mode: str = "vol_target"
+    size_target_vol: float = 0.20
+    size_half_life: int = 20
+    size_min_scale: float = 0.0
+    size_max_scale: float = 3.0
+    size_rebalance_band: float = 0.10
     close_positions_on_stop: bool = True
 
 
@@ -125,7 +123,17 @@ class ErrMomEma30Entry(Strategy):
         self._entry = BarAggregator(config.entry_tf_minutes * 60)
         self._ermom = ErrorAdjustedMomentum(config.w_f, config.w_e, config.momentum_window)
         self._atr = DailyAtr(config.atr_period)
-        self._vol = RealizedVol(config.vol_lookback)
+        self._sizer = VolTargetSizer(
+            VolTargetConfig(
+                target_vol=config.size_target_vol,
+                half_life=config.size_half_life,
+                min_scale=config.size_min_scale,
+                max_scale=config.size_max_scale,
+                rebalance_band=config.size_rebalance_band,
+                periods_per_year=365,
+                mode=config.sizing_mode,
+            )
+        )
         self._ema_fast = Ema(config.ema_fast)
         self._ema_slow = Ema(config.ema_slow)
         self._long = RibbonEntryMachine(1, config.n_pull)
@@ -133,6 +141,7 @@ class ErrMomEma30Entry(Strategy):
         self._stop_price: float | None = None
         self._pending_atr: float | None = None
         self._active_direction = 0
+        self._sized_this_bar = False
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -142,16 +151,20 @@ class ErrMomEma30Entry(Strategy):
             self.close_all_positions(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
+        self._sized_this_bar = False
         ts = int(bar.ts_init)
         o, h, l, c = (bar.open.as_double(), bar.high.as_double(), bar.low.as_double(), bar.close.as_double())
         daily = self._daily.update(ts, o, h, l, c)  # daily first: fresh regime wins the 00:00 bar
         if daily is not None:
             self._ermom.update(daily.close)
             self._atr.update(daily.open, daily.high, daily.low, daily.close)
-            self._vol.update(daily.close)
+            self._sizer.update(daily.close)
         entry = self._entry.update(ts, o, h, l, c)
         if entry is not None:
             self._on_entry(entry)
+        if daily is not None and not self._sized_this_bar and not self.portfolio.is_flat(self.config.instrument_id):
+            side = 1 if self.portfolio.is_net_long(self.config.instrument_id) else -1
+            self._sync_size(side, allow_new=False, allow_resize=True)
 
     def _prepare_machine(self, regime: int) -> RibbonEntryMachine:
         """Select the active direction machine, resetting both on sign flip.
@@ -178,19 +191,17 @@ class ErrMomEma30Entry(Strategy):
             if self.config.risk_stop_enabled and is_stop_hit(side, entry_bar.close, self._stop_price):
                 self.close_all_positions(self.config.instrument_id)
                 self._stop_price = None
+                self._sized_this_bar = True
                 return
             if ema_f is not None and ema_s is not None and should_exit(side, regime, entry_bar.close, ema_f, ema_s):
                 self.close_all_positions(self.config.instrument_id)
                 self._stop_price = None
                 self._long.reset()
                 self._short.reset()
+                self._sized_this_bar = True
             return
 
-        blocked = (
-            regime == 0
-            or (self.config.vol_filter_enabled and self._vol.value is not None and self._vol.value > self.config.vol_threshold)
-        )
-        if blocked or ema_f is None or ema_s is None:
+        if regime == 0 or ema_f is None or ema_s is None:
             self._long.reset()
             self._short.reset()
             return
@@ -200,20 +211,60 @@ class ErrMomEma30Entry(Strategy):
             o=entry_bar.open, h=entry_bar.high, l=entry_bar.low, c=entry_bar.close,
             ema_fast=ema_f, ema_slow=ema_s, regime_allows=True,
         ):
-            self._submit(OrderSide.BUY if regime > 0 else OrderSide.SELL)
+            self._sync_size(1 if regime > 0 else -1, allow_new=True, allow_resize=False)
+
+    def _signed_qty(self) -> Decimal:
+        return Decimal(str(self.portfolio.net_position(self.config.instrument_id)))
+
+    def _reset_machines(self) -> None:
+        self._stop_price = None
+        self._long.reset()
+        self._short.reset()
+
+    def _sync_size(self, direction: int, *, allow_new: bool, allow_resize: bool) -> None:
+        desired = self._sizer.desired_qty(direction, self.config.trade_size)
+        current = self._signed_qty()
+        if desired is None:
+            return
+        if current == 0 and desired != 0 and not allow_new:
+            return
+        same_sign = current != 0 and desired != 0 and (current > 0) == (desired > 0)
+        if same_sign and not allow_resize:
+            return
+        if not self._sizer.should_rebalance(current, desired):
+            return
+        if current != 0 and (desired == 0 or (current > 0) != (desired > 0)):
+            self.close_all_positions(self.config.instrument_id)
+            self._reset_machines()
+            self._sized_this_bar = True
+            current = Decimal("0")
+            if desired == 0:
+                return
+        if current == 0 and desired != 0:
+            self._submit(OrderSide.BUY if desired > 0 else OrderSide.SELL, abs(desired), seed_stop=True)
+            return
+        delta = desired - current
+        if delta == 0:
+            return
+        self._submit(OrderSide.BUY if delta > 0 else OrderSide.SELL, abs(delta), seed_stop=False)
 
     # ponytail: market orders assumed fully filled; partial-fill retry is live-phase work (spec 5)
-    def _submit(self, side: OrderSide) -> None:
+    def _submit(self, side: OrderSide, qty: Decimal, seed_stop: bool = True) -> None:
         instrument = self.cache.instrument(self.config.instrument_id)
         if instrument is None:
             self.log.error(f"Instrument not in cache: {self.config.instrument_id}")
             return
-        self._pending_atr = self._atr.value
+        q = instrument.make_qty(qty)
+        if q == 0:
+            return
+        if seed_stop:
+            self._pending_atr = self._atr.value
+        self._sized_this_bar = True
         self.submit_order(
             self.order_factory.market(
                 self.config.instrument_id,
                 side,
-                instrument.make_qty(self.config.trade_size),
+                q,
             )
         )
 

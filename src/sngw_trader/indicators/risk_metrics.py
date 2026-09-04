@@ -5,8 +5,6 @@ Streaming, one update per completed bar, valid values only after warm-up.
 
 from __future__ import annotations
 
-import math
-
 
 class Ema:
     """Span-based EMA seeded with the SMA of the first `span` values."""
@@ -57,32 +55,6 @@ class DailyAtr:
             return self._atr
         self._atr = (self._atr * (self._period - 1) + tr) / self._period
         return self._atr
-
-
-class RealizedVol:
-    """Annualized sample std of the last `lookback` daily simple returns."""
-
-    def __init__(self, lookback: int = 20, periods_per_year: int = 365) -> None:
-        self._lookback = lookback
-        self._ppy = periods_per_year
-        self._prev: float | None = None
-        self._returns: list[float] = []
-
-    @property
-    def value(self) -> float | None:
-        if len(self._returns) < self._lookback:
-            return None
-        mean = sum(self._returns) / self._lookback
-        var = sum((r - mean) ** 2 for r in self._returns) / (self._lookback - 1)
-        return math.sqrt(var) * math.sqrt(self._ppy)
-
-    def update(self, close: float) -> float | None:
-        if self._prev is not None:
-            self._returns.append(close / self._prev - 1)
-            if len(self._returns) > self._lookback:
-                self._returns.pop(0)
-        self._prev = close
-        return self.value
 
 
 def stop_price(side: int, ref_price: float, atr: float, mult: float) -> float:

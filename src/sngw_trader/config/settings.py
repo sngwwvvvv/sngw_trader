@@ -58,9 +58,12 @@ class Settings:
     risk_stop_enabled: bool
     atr_period: int
     atr_mult: float
-    vol_filter_enabled: bool
-    vol_lookback: int
-    vol_threshold: float
+    sizing_mode: str
+    size_target_vol: float
+    size_half_life: int
+    size_min_scale: float
+    size_max_scale: float
+    size_rebalance_band: float
     catalog_start: datetime | None
     catalog_end: datetime | None
 
@@ -78,6 +81,13 @@ class Settings:
         if symbol.endswith(".OKX"):
             return symbol
         return f"{symbol}.OKX"
+
+
+def _sizing_mode() -> str:
+    mode = _env("SIZING_MODE", "vol_target")
+    if mode not in {"vol_target", "fixed"}:
+        raise SystemExit(f"SIZING_MODE must be vol_target or fixed, got {mode!r}")
+    return mode
 
 
 def load_settings() -> Settings:
@@ -115,9 +125,12 @@ strategy=_env("STRATEGY", "err_mom_a"),
         risk_stop_enabled=_env("RISK_STOP_ENABLED", "true").lower() in {"1", "true", "yes"},
         atr_period=int(_env("ATR_PERIOD", "14")),
         atr_mult=float(_env("ATR_MULT", "3")),
-        vol_filter_enabled=_env("VOL_FILTER_ENABLED", "true").lower() in {"1", "true", "yes"},
-        vol_lookback=int(_env("VOL_LOOKBACK", "20")),
-        vol_threshold=float(_env("VOL_THRESHOLD", "0.80")),
+        sizing_mode=_sizing_mode(),
+        size_target_vol=float(_env("SIZE_TARGET_VOL", "0.20")),
+        size_half_life=int(_env("SIZE_HALF_LIFE", "20")),
+        size_min_scale=float(_env("SIZE_MIN_SCALE", "0.0")),
+        size_max_scale=float(_env("SIZE_MAX_SCALE", "3.0")),
+        size_rebalance_band=float(_env("SIZE_REBALANCE_BAND", "0.10")),
         catalog_start=_optional_ts("CATALOG_START"),
         catalog_end=_optional_ts("CATALOG_END"),
     )

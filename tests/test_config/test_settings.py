@@ -37,9 +37,12 @@ def test_instrument_id_appends_venue() -> None:
         risk_stop_enabled=True,
         atr_period=14,
         atr_mult=3.0,
-        vol_filter_enabled=True,
-        vol_lookback=20,
-        vol_threshold=0.80,
+        sizing_mode="vol_target",
+        size_target_vol=0.20,
+        size_half_life=20,
+        size_min_scale=0.0,
+        size_max_scale=3.0,
+        size_rebalance_band=0.10,
         catalog_start=datetime(2026, 1, 1),
         catalog_end=datetime(2026, 3, 1),
     )
@@ -81,9 +84,12 @@ def test_live_requires_confirm() -> None:
         risk_stop_enabled=True,
         atr_period=14,
         atr_mult=3.0,
-        vol_filter_enabled=True,
-        vol_lookback=20,
-        vol_threshold=0.80,
+        sizing_mode="vol_target",
+        size_target_vol=0.20,
+        size_half_life=20,
+        size_min_scale=0.0,
+        size_max_scale=3.0,
+        size_rebalance_band=0.10,
         catalog_start=datetime(2026, 1, 1),
         catalog_end=datetime(2026, 3, 1),
     )
@@ -97,8 +103,19 @@ def test_err_mom_defaults():
     assert s.strategy in {"err_mom_a", "err_mom_b"}
     assert (s.w_f, s.w_e, s.momentum_window) == (10, 10, 200)
     assert s.ema_fast < s.ema_slow
-    assert s.vol_threshold == 0.80
+    assert s.sizing_mode == "vol_target"
+    assert s.size_target_vol == 0.20
+    assert s.size_half_life == 20
+    assert s.size_rebalance_band == 0.10
     assert s.trade_size == "0.01"
+
+
+def test_bad_sizing_mode_exits(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("SIZING_MODE", "nope")
+    with pytest.raises(SystemExit):
+        load_settings()
 
 
 def _base_env() -> dict[str, str]:
