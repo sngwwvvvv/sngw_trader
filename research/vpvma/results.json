@@ -1,0 +1,112 @@
+{
+  "long_only/is/base": {
+    "n_trades_closed": 69,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -59.69,
+    "cagr": -0.003177140853130922,
+    "mdd_ratio": 0.005937173669355866,
+    "sharpe_like_sortino": -0.6091121649586108,
+    "win_rate": 0.014492753623188406,
+    "profit_factor": 0.006197692953209408
+  },
+  "long_only/is/stress": {
+    "n_trades_closed": 69,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -118.44,
+    "cagr": -0.006333104868286865,
+    "mdd_ratio": 0.011783017831812792,
+    "sharpe_like_sortino": -0.6445118207614683,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_only/oos/base": {
+    "n_trades_closed": 110,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -131.63,
+    "cagr": -0.004540721555823635,
+    "mdd_ratio": 0.013115423017269978,
+    "sharpe_like_sortino": -0.6199080591426724,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_only/oos/stress": {
+    "n_trades_closed": 110,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -268.36,
+    "cagr": -0.009294536295319622,
+    "mdd_ratio": 0.026748048027065097,
+    "sharpe_like_sortino": -0.6298634000294799,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_short/is/base": {
+    "n_trades_closed": 236,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -223.21,
+    "cagr": -0.011553961734133034,
+    "mdd_ratio": 0.022301047818034325,
+    "sharpe_like_sortino": -0.5257426754315461,
+    "win_rate": 0.01694915254237288,
+    "profit_factor": 0.008252314029711395
+  },
+  "long_short/is/stress": {
+    "n_trades_closed": 236,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -439.19,
+    "cagr": -0.022869111700129396,
+    "mdd_ratio": 0.043902911942780176,
+    "sharpe_like_sortino": -0.5594299348474712,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_short/oos/base": {
+    "n_trades_closed": 389,
+    "n_open_at_end": 1,
+    "open_pnl": 11.97,
+    "total_pnl": -525.4,
+    "cagr": -0.018608015049352944,
+    "mdd_ratio": 0.053820464297054116,
+    "sharpe_like_sortino": -0.5617298664360916,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_short/oos/stress": {
+    "n_trades_closed": 389,
+    "n_open_at_end": 1,
+    "open_pnl": 11.97,
+    "total_pnl": -1071.85,
+    "cagr": -0.03827181742827557,
+    "mdd_ratio": 0.10864771555792596,
+    "sharpe_like_sortino": -0.5665258086662074,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_only/vt/oos/base/sens": {
+    "n_trades_closed": 110,
+    "n_open_at_end": 0,
+    "open_pnl": 0.0,
+    "total_pnl": -65.82,
+    "cagr": -0.0022800220860895726,
+    "mdd_ratio": 0.006557160319238364,
+    "sharpe_like_sortino": -0.6202738729946505,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  },
+  "long_short/vt/oos/base/sens": {
+    "n_trades_closed": 389,
+    "n_open_at_end": 1,
+    "open_pnl": 5.98,
+    "total_pnl": -262.7,
+    "cagr": -0.009270686903048997,
+    "mdd_ratio": 0.026902563629874643,
+    "sharpe_like_sortino": -0.5630854836200158,
+    "win_rate": 0.0,
+    "profit_factor": 0.0
+  }
+}
