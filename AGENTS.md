@@ -15,3 +15,7 @@
 - 자체 루프, `ccxt`, `python-okx` 직접 주문 금지.
 
 자세한 금지 항목, 레이아웃, OKX 규칙, 작업 순서는 `NAUTILUS_VIBE_RULES.md`를 따른다.
+
+## Wiki handoff protocol
+
+For Wiki handoff tasks, read `docs/handoff-workflow.md`.
