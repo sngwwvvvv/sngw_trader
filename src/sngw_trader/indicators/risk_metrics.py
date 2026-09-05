@@ -65,3 +65,31 @@ def is_stop_hit(side: int, price: float, stop: float | None) -> bool:
     if stop is None or side == 0:
         return False
     return price < stop if side > 0 else price > stop
+
+
+def is_take_profit_hit(side: int, price: float, tp: float | None) -> bool:
+    if tp is None or side == 0:
+        return False
+    return price > tp if side > 0 else price < tp
+
+
+def bracket_hit(
+    side: int,
+    high: float,
+    low: float,
+    sl: float | None,
+    tp: float | None,
+) -> str | None:
+    """Return 'sl' or 'tp' if the 1m bar range tags the bracket.
+
+    If both are touched in the same bar, stop-loss wins (pessimistic).
+    """
+    if side == 0:
+        return None
+    stop_px = low if side > 0 else high
+    tp_px = high if side > 0 else low
+    if is_stop_hit(side, stop_px, sl):
+        return "sl"
+    if is_take_profit_hit(side, tp_px, tp):
+        return "tp"
+    return None

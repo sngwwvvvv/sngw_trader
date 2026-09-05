@@ -3,7 +3,9 @@ import math
 from sngw_trader.indicators.risk_metrics import (
     DailyAtr,
     Ema,
+    bracket_hit,
     is_stop_hit,
+    is_take_profit_hit,
     stop_price,
 )
 
@@ -47,3 +49,24 @@ def test_stop_helpers():
     assert is_stop_hit(-1, price=100.0, stop=110.0) is False
     assert is_stop_hit(0, price=50.0, stop=60.0) is False
     assert is_stop_hit(1, price=50.0, stop=None) is False
+    assert is_take_profit_hit(+1, price=107.0, tp=106.0) is True
+    assert is_take_profit_hit(+1, price=105.0, tp=106.0) is False
+    assert is_take_profit_hit(-1, price=93.0, tp=94.0) is True
+    assert is_take_profit_hit(-1, price=95.0, tp=94.0) is False
+    assert is_take_profit_hit(0, price=110.0, tp=106.0) is False
+    assert is_take_profit_hit(1, price=110.0, tp=None) is False
+
+
+def test_bracket_hit_stop_wins_when_both_touched():
+    assert bracket_hit(+1, high=107.0, low=93.0, sl=94.0, tp=106.0) == "sl"
+    assert bracket_hit(-1, high=107.0, low=93.0, sl=106.0, tp=94.0) == "sl"
+
+
+def test_bracket_hit_take_profit_only():
+    assert bracket_hit(+1, high=107.0, low=95.0, sl=94.0, tp=106.0) == "tp"
+    assert bracket_hit(-1, high=105.0, low=93.0, sl=106.0, tp=94.0) == "tp"
+
+
+def test_bracket_hit_none():
+    assert bracket_hit(+1, high=105.0, low=95.0, sl=94.0, tp=106.0) is None
+    assert bracket_hit(0, high=107.0, low=93.0, sl=94.0, tp=106.0) is None

@@ -1,20 +1,19 @@
-"""KD + MACD combo strategy (Wang & Huang 2026, raw-trading-0007).
+"""KD + MACD combo strategy (Wang & Huang 2026 entry, repo exit overlay).
 
-Rules (paper literal, cross mode):
-- Long entry: KD golden cross (K crosses above D) AND MACD bar > 0.
-- Long exit:  KD death cross (K crosses below D) AND MACD bar < 0.
-- allow_short=True variant: death-cross condition opens a short instead of
-  only closing; golden cross flips back to long.
+Entry (both modes, cross default):
+- Long: KD golden cross (K crosses above D) AND MACD bar > 0.
+- Short (allow_short only, and only when flat): KD death cross AND bar < 0.
+
+Exits:
+- Long-only: KD death cross OR MACD bar < 0 (daily close).
+- Long+short: ATR(14)×3 stop and 1:1 take-profit, seeded at fill.
+  Opposite KD-MACD signals do not flip; the bracket owns the exit.
+  1-minute high/low hit-check; if both sides tag the same bar, SL wins.
 
 Sizing: Harvey-style volatility targeting via VolTargetSizer on UTC daily
-bars (periods_per_year=365). Position is resized on daily closes when the
-desired qty drifts beyond the rebalance band. Before the vol warmup the
-sizer has no scale, so the unit trade_size qty is used (documented fallback).
-
-Design note: the signal -> target -> qty decision is a pure method
-(``_decide``) fed by completed UTC daily bars, so it is unit-testable
-without a Nautilus engine. ``_side`` is optimistic internal position state,
-reconciled against real fills (position_qty) in ``on_event``.
+bars (periods_per_year=365). Desired qty is compared to actual signed qty
+(not ±trade_size). Before the vol warmup the sizer has no scale, so the
+unit trade_size qty is used (documented fallback).
 
 Strategy logic only. No runner assembly, no exchange I/O.
 """
@@ -31,20 +30,38 @@ from nautilus_trader.trading import Strategy
 
 from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.indicators.kd_macd import KdStochastic, Macd, crossed_down, crossed_up
+from sngw_trader.indicators.risk_metrics import DailyAtr, bracket_hit, stop_price
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
 
 _VALID_TRIGGERS = frozenset({"cross", "state"})
 
 
-def direction_target(golden: bool, death: bool, current: int, allow_short: bool) -> int:
+def direction_target(
+    golden: bool,
+    death: bool,
+    current: int,
+    allow_short: bool,
+    macd_bar_neg: bool = False,
+) -> int:
     """Map KD-MACD signals to a target direction.
 
-    golden -> +1, death -> 0 (long-only) or -1 (allow_short), no signal -> hold.
+    Long-only: golden -> +1; death or MACD bar < 0 -> 0.
+    Long+short: entries only when flat; opposite signals do not flip (bracket exits).
     """
+    if allow_short:
+        if current != 0:
+            return current
+        if golden:
+            return 1
+        if death:
+            return -1
+        return 0
+    if current == 1 and (death or macd_bar_neg):
+        return 0
     if golden:
         return 1
     if death:
-        return -1 if allow_short else 0
+        return 0
     return current
 
 
@@ -67,6 +84,8 @@ class KdMacdCryptoConfig(StrategyConfig, frozen=True):
     macd_signal: int = 9
     allow_short: bool = False
     trigger_mode: str = "cross"  # "cross" (paper literal) | "state" (sensitivity)
+    atr_period: int = 14
+    atr_mult: float = 3.0
     sizing_mode: str = "vol_target"
     size_target_vol: float = 0.20
     size_half_life: int = 20
@@ -100,12 +119,15 @@ class KdMacdCrypto(Strategy):
                 mode=config.sizing_mode,
             )
         )
+        self._atr = DailyAtr(config.atr_period)
         self._prev_k: float | None = None
         self._prev_d: float | None = None
         self._prev_long_cond: bool | None = None
         self._prev_short_cond: bool | None = None
         self._side: int = 0  # optimistic internal state; reconciled by on_event
         self._signed_qty_total: float = 0.0
+        self._stop_price: float | None = None
+        self._tp_price: float | None = None
         self._sized_this_bar = False
 
     def on_start(self) -> None:
@@ -122,61 +144,93 @@ class KdMacdCrypto(Strategy):
         h = bar.high.as_double()
         l = bar.low.as_double()
         c = bar.close.as_double()
+        exited = False
+        bracket = self._bracket_intent(h, l)
+        if bracket is not None:
+            self._execute(bracket)
+            self._side = 0
+            self._stop_price = None
+            self._tp_price = None
+            exited = True
         day = self._daily.update(ts, o, h, l, c)
         if day is None:
+            return
+        if exited:
+            self._update_indicators(day.open, day.high, day.low, day.close)
             return
         for intent in self._decide(day.open, day.high, day.low, day.close):
             self._execute(intent)
 
     # --- pure decision core (unit-testable) ---------------------------------
 
+    def _update_indicators(
+        self, o: float, h: float, l: float, c: float
+    ) -> tuple[tuple[float, float] | None, tuple[float, float, float] | None]:
+        self._sizer.update(c)
+        self._atr.update(o, h, l, c)
+        return self._kd.update(h, l, c), self._macd.update(c)
+
     def _decide(
         self, o: float, h: float, l: float, c: float
     ) -> list[OrderIntent]:
         """Consume one completed UTC daily bar; return order intents."""
-        self._sizer.update(c)
-        kd_out = self._kd.update(h, l, c)
-        macd_out = self._macd.update(c)
+        kd_out, macd_out = self._update_indicators(o, h, l, c)
         if kd_out is None or macd_out is None:
             return []
         k, d = kd_out
         _dif, _dea, bar_val = macd_out
 
-        golden = death = False
+        kd_up = kd_down = False
         if self.config.trigger_mode == "cross":
             if self._prev_k is not None:
-                golden = crossed_up(self._prev_k, self._prev_d, k, d) and bar_val > 0
-                death = crossed_down(self._prev_k, self._prev_d, k, d) and bar_val < 0
-        else:  # state: condition transition
-            long_cond = k > d and bar_val > 0
-            short_cond = k < d and bar_val < 0
-            golden = long_cond and not (self._prev_long_cond or False)
-            death = short_cond and not (self._prev_short_cond or False)
+                kd_up = crossed_up(self._prev_k, self._prev_d, k, d)
+                kd_down = crossed_down(self._prev_k, self._prev_d, k, d)
+        else:
+            long_cond = k > d
+            short_cond = k < d
+            kd_up = long_cond and not (self._prev_long_cond or False)
+            kd_down = short_cond and not (self._prev_short_cond or False)
             self._prev_long_cond = long_cond
             self._prev_short_cond = short_cond
         self._prev_k, self._prev_d = k, d
 
-        target = direction_target(golden, death, self._side, self.config.allow_short)
+        if self.config.allow_short:
+            target = direction_target(
+                golden=kd_up and bar_val > 0,
+                death=kd_down and bar_val < 0,
+                current=self._side,
+                allow_short=True,
+            )
+        else:
+            target = direction_target(
+                golden=kd_up and bar_val > 0,
+                death=kd_down,
+                current=self._side,
+                allow_short=False,
+                macd_bar_neg=bar_val < 0,
+            )
         return self._intents_for(target)
+
+    def _current_qty(self) -> Decimal:
+        step = Decimal(self.config.size_increment)
+        raw = Decimal(str(self._signed_qty_total))
+        return (raw / step).to_integral_value(rounding="ROUND_HALF_UP") * step
 
     def _intents_for(self, target: int) -> list[OrderIntent]:
         desired = self._sizer.desired_qty(target, self.config.trade_size)
+        step = Decimal(self.config.size_increment)
         if desired is None:
             # vol-target warmup: fall back to unit qty so signals still trade
             desired = (
                 Decimal("0") if target == 0 else Decimal(target) * self.config.trade_size
             )
         else:
-            # round to the instrument qty step (scaled sizes may round to zero:
-            # vol targeting then holds no position rather than an untradable one)
-            step = Decimal(self.config.size_increment)
             desired = (desired / step).to_integral_value(rounding="ROUND_HALF_UP") * step
-        current = self._side * self.config.trade_size
+        current = self._current_qty()
         if current == desired:
             return []
         intents: list[OrderIntent] = []
         if current != 0 and (desired == 0 or (current > 0) != (desired > 0)):
-            # close existing position first (NETTING-safe)
             intents.append(
                 OrderIntent(-1 if current > 0 else 1, abs(current))
             )
@@ -190,26 +244,56 @@ class KdMacdCrypto(Strategy):
         if current != 0 and not self._sizer.should_rebalance(current, desired):
             return intents
         intents.append(OrderIntent(1 if delta > 0 else -1, abs(delta)))
-        # Optimistic side update; on_event reconciles with real fills.
         self._side = target
         return intents
 
+    def _seed_bracket(self, side: int, fill_px: float) -> None:
+        atr = self._atr.value
+        if side == 0 or atr is None:
+            self._stop_price = None
+            self._tp_price = None
+            return
+        self._stop_price = stop_price(side, fill_px, atr, self.config.atr_mult)
+        self._tp_price = stop_price(-side, fill_px, atr, self.config.atr_mult)
+
+    def _bracket_intent(self, high: float, low: float) -> OrderIntent | None:
+        if not self.config.allow_short or self._side == 0:
+            return None
+        if bracket_hit(self._side, high, low, self._stop_price, self._tp_price) is None:
+            return None
+        qty = abs(self._current_qty())
+        if qty == 0:
+            return None
+        return OrderIntent(-1 if self._side > 0 else 1, qty)
+
     # --- execution (thin) ----------------------------------------------------
 
-    def on_event(self, event) -> None:
-        # Reconcile internal position from fills: accumulate signed qty.
-        from nautilus_trader.model.events import OrderFilled
-
-        if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
-            return
-        signed = float(event.last_qty) * (1.0 if event.order_side == OrderSide.BUY else -1.0)
-        self._signed_qty_total += signed
-        tol = float(self.config.trade_size) / 2.0
+    def _apply_fill(self, signed_qty: float) -> None:
+        self._signed_qty_total += signed_qty
+        # flatten only inside half a qty step, not half a unit (vol-target
+        # can hold a single increment that is smaller than trade_size)
+        tol = float(Decimal(self.config.size_increment)) / 2.0
         if abs(self._signed_qty_total) <= tol:
             self._signed_qty_total = 0.0
         self._side = (
             1 if self._signed_qty_total > 0 else (-1 if self._signed_qty_total < 0 else 0)
         )
+
+    def on_event(self, event) -> None:
+        from nautilus_trader.model.events import OrderFilled
+
+        if not isinstance(event, OrderFilled) or event.instrument_id != self.config.instrument_id:
+            return
+        prev_qty = self._signed_qty_total
+        signed = float(event.last_qty) * (1.0 if event.order_side == OrderSide.BUY else -1.0)
+        self._apply_fill(signed)
+        if not self.config.allow_short:
+            return
+        if prev_qty == 0.0 and self._signed_qty_total != 0.0:
+            self._seed_bracket(self._side, event.last_px.as_double())
+        elif self._signed_qty_total == 0.0:
+            self._stop_price = None
+            self._tp_price = None
 
     def _execute(self, intent: OrderIntent) -> None:
         instrument = self.cache.instrument(self.config.instrument_id)

@@ -17,9 +17,11 @@ from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.core.datetime import dt_to_unix_nanos
 from nautilus_trader.model.enums import PriceType
 from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
+from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.research.config import GridSpec
 from sngw_trader.research.executor import build_strategy
 from sngw_trader.research.metrics import (
@@ -66,8 +68,73 @@ def stress_settings(settings: Settings) -> Settings:
     )
 
 
+def mtm_equity_marks(
+    daily_closes: list[tuple[int, float]],
+    cash_marks: list[tuple[int, float]],
+    lots: list[tuple[int, int | None, float, float]],
+    window_start_ns: int,
+    initial_cash: float,
+) -> list[tuple[int, float]]:
+    """Daily mark-to-market equity: cash + signed qty * (close - avg)."""
+    cash_marks = sorted(cash_marks, key=lambda m: m[0])
+
+    def cash_at(ts: int) -> float:
+        last = initial_cash
+        for t, v in cash_marks:
+            if t > ts:
+                break
+            last = v
+        return last
+
+    def lot_at(ts: int) -> tuple[float, float]:
+        qty = avg = 0.0
+        for opened, closed, q, a in lots:
+            if opened <= ts and (closed is None or ts < closed):
+                qty += q
+                avg = a
+        return qty, avg
+
+    out: list[tuple[int, float]] = []
+    for ts, px in daily_closes:
+        if ts < window_start_ns:
+            continue
+        qty, avg = lot_at(ts)
+        upl = qty * (px - avg) if qty != 0 else 0.0
+        out.append((ts, cash_at(ts) + upl))
+    return out
+
+
+def _lots_from_positions(positions) -> list[tuple[int, int | None, float, float]]:
+    lots = []
+    for p in positions:
+        side = 1.0 if p.side.name == "LONG" else -1.0
+        closed = int(p.ts_closed) if p.is_closed else None
+        lots.append((int(p.ts_opened), closed, side * float(p.quantity), float(p.avg_px_open)))
+    return lots
+
+
+def load_daily_closes(catalog_path: str, bar_type: str) -> list[tuple[int, float]]:
+    """UTC-daily closes from the 1-minute catalog. Loaded once per process."""
+    catalog = ParquetDataCatalog(path=str(catalog_path))
+    bars = catalog.bars(bar_types=[bar_type])
+    agg = BarAggregator(86_400)
+    out: list[tuple[int, float]] = []
+    for bar in bars:
+        day = agg.update(
+            int(bar.ts_init),
+            bar.open.as_double(),
+            bar.high.as_double(),
+            bar.low.as_double(),
+            bar.close.as_double(),
+        )
+        if day is not None:
+            out.append((day.ts_close_ns, day.close))
+    return out
+
+
 def evaluate(result, open_positions, engine_cache) -> dict:
-    equity = compute_equity_metrics(result.equity_marks, INITIAL_CAPITAL)
+    basis = result.equity_marks[0][1] if result.equity_marks else INITIAL_CAPITAL
+    equity = compute_equity_metrics(result.equity_marks, basis)
     trades = compute_trade_metrics(result.trade_pnls, result.trade_returns)
     extra = 0.0
     n_open = 0
@@ -102,6 +169,7 @@ def run_cell(
     segment: str,
     cost: str,
     settings: Settings,
+    daily_closes: list[tuple[int, float]],
     params: dict | None = None,
 ) -> dict:
     start, end = SEGMENTS[segment]
@@ -129,14 +197,24 @@ def run_cell(
         pnls = [p.realized_pnl.as_double() for p in closed]
         returns = [p.realized_return for p in closed]
         open_positions = [p for p in all_positions if not p.is_closed]
-        marks = []
+        cash_marks = []
         account = engine.cache.account_for_venue(Venue("OKX"))
         if account is not None:
             events = account.events() if callable(account.events) else account.events
             for ev in events:
                 if ev.ts_init >= window_ns and ev.balances:
-                    marks.append((ev.ts_init, max(b.total.as_double() for b in ev.balances)))
-            marks.sort()
+                    cash_marks.append(
+                        (ev.ts_init, max(b.total.as_double() for b in ev.balances))
+                    )
+            cash_marks.sort()
+        lots = _lots_from_positions(all_positions)
+        end_ns = dt_to_unix_nanos(end)
+        window_closes = [(t, px) for t, px in daily_closes if window_ns <= t <= end_ns]
+        marks = mtm_equity_marks(
+            window_closes, cash_marks, lots, window_ns, INITIAL_CAPITAL
+        )
+        if not marks:
+            marks = cash_marks
         from sngw_trader.research.executor import RunResult
 
         result = RunResult(
@@ -161,6 +239,9 @@ def main() -> int:
 
     settings = load_settings()
     stressed = stress_settings(settings)
+    bar_type = default_bar_type(INSTRUMENT_ID)
+    print("loading daily closes from catalog...", flush=True)
+    daily_closes = load_daily_closes(str(settings.catalog_path), bar_type)
 
     cells: dict[str, dict] = {}
     combos = [
@@ -177,12 +258,14 @@ def main() -> int:
         key = f"{variant}/{segment}/{cost}"
         print(f"[{done + 1}/{total}] {key}", flush=True)
         st = stressed if cost == "stress" else settings
-        cells[key] = run_cell(variant, segment, cost, st)
+        cells[key] = run_cell(variant, segment, cost, st, daily_closes)
         done += 1
     for variant, segment, cost, params in sens_combos:
         key = f"{variant}/{segment}/{cost}/sens(kd_n={params['kd_n']},state)"
         print(f"[{done + 1}/{total}] {key}", flush=True)
-        cells[key] = run_cell(variant, segment, cost, settings, params)
+        cells[key] = run_cell(
+            variant, segment, cost, settings, daily_closes, params
+        )
         done += 1
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -24,19 +24,29 @@ BAR_TYPE = BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL")
 
 
 def test_direction_target_truth_table():
-    # golden cross -> long (both modes)
+    # golden cross -> long (both modes, only when flat or already long)
     assert direction_target(golden=True, death=False, current=0, allow_short=False) == 1
     assert direction_target(golden=True, death=False, current=0, allow_short=True) == 1
-    # death cross: long-only closes, long+short flips
-    assert direction_target(golden=False, death=True, current=1, allow_short=False) == 0
-    assert direction_target(golden=False, death=True, current=1, allow_short=True) == -1
-    # long-only mode cannot hold a short; death maps to flat by definition
+    # long-only: death cross closes even if MACD bar is still positive
+    assert direction_target(
+        golden=False, death=True, current=1, allow_short=False, macd_bar_neg=False
+    ) == 0
+    # long-only: MACD bar < 0 closes without a death cross
+    assert direction_target(
+        golden=False, death=False, current=1, allow_short=False, macd_bar_neg=True
+    ) == 0
+    # long-only cannot hold a short
     assert direction_target(golden=False, death=True, current=-1, allow_short=False) == 0
-    # no signal -> hold current
-    assert direction_target(golden=False, death=False, current=1, allow_short=False) == 1
+    # no signal, bar still positive -> hold
+    assert direction_target(
+        golden=False, death=False, current=1, allow_short=False, macd_bar_neg=False
+    ) == 1
     assert direction_target(golden=False, death=False, current=0, allow_short=True) == 0
-    # golden while short flips to long
-    assert direction_target(golden=True, death=False, current=-1, allow_short=True) == 1
+    # long+short: opposite KD-MACD signal does not flip; bracket owns the exit
+    assert direction_target(golden=False, death=True, current=1, allow_short=True) == 1
+    assert direction_target(golden=True, death=False, current=-1, allow_short=True) == -1
+    # long+short: entries only when flat
+    assert direction_target(golden=False, death=True, current=0, allow_short=True) == -1
 
 
 # --- config defaults --------------------------------------------------------
@@ -62,6 +72,8 @@ def test_config_defaults_match_paper():
     assert c.sizing_mode == "vol_target"
     assert c.size_target_vol == 0.20
     assert c.size_half_life == 20
+    assert c.atr_period == 14
+    assert c.atr_mult == 3.0
     assert c.instrument_id.value.endswith(".OKX")
 
 
@@ -125,10 +137,20 @@ def _scenario_down():
     return rally + decline
 
 
+def _apply_intents(s, intents):
+    """Tests have no fill engine; apply qty so later _decide sees actual size."""
+    for i in intents:
+        s._signed_qty_total += float(i.qty) * (1.0 if i.side > 0 else -1.0)
+        if abs(s._signed_qty_total) < 1e-12:
+            s._signed_qty_total = 0.0
+
+
 def _decide_all(s, days):
     intents = []
     for o, h, l, c in days:
-        intents.extend(s._decide(o, h, l, c))
+        chunk = s._decide(o, h, l, c)
+        _apply_intents(s, chunk)
+        intents.extend(chunk)
     return intents
 
 
@@ -153,10 +175,10 @@ def test_long_only_no_short_after_death_cross():
     assert s._side in (0, 1)  # never went short
 
 
-def test_allow_short_opens_short_on_death_cross():
+def test_allow_short_holds_through_opposite_signal():
     s = KdMacdCrypto(config=_config(sizing_mode="fixed", allow_short=True))
-    intents = _decide_all(s, _scenario_long() + _scenario_down())
-    assert s._side == -1, "expected to end short after sustained decline"
+    _decide_all(s, _scenario_long() + _scenario_down())
+    assert s._side == 1, "long+short stays in the entry until ATR bracket hits"
 
 
 def test_death_cross_long_only_returns_to_flat():
@@ -194,6 +216,96 @@ def test_state_trigger_mode_runs():
     s = KdMacdCrypto(config=_config(sizing_mode="fixed", trigger_mode="state"))
     intents = _decide_all(s, _scenario_long() + _scenario_down())
     assert intents
+
+
+def test_apply_fill_keeps_position_smaller_than_unit():
+    s = KdMacdCrypto(
+        config=_config(trade_size=Decimal("0.02"), size_increment="0.01", sizing_mode="fixed")
+    )
+    s._apply_fill(0.01)
+    assert s._signed_qty_total == 0.01
+    assert s._side == 1
+    s._apply_fill(-0.01)
+    assert s._signed_qty_total == 0.0
+    assert s._side == 0
+
+
+def test_intents_for_closes_actual_qty_not_unit():
+    s = KdMacdCrypto(config=_config(sizing_mode="fixed"))
+    s._side = 1
+    s._signed_qty_total = 0.04
+    intents = s._intents_for(0)
+    assert len(intents) == 1
+    assert intents[0].side == -1
+    assert intents[0].qty == Decimal("0.04")
+
+
+def test_long_only_decide_exits_on_macd_bar_negative():
+    s = KdMacdCrypto(config=_config(sizing_mode="fixed"))
+    s._side = 1
+    s._signed_qty_total = 0.01
+    s._prev_k, s._prev_d = 80.0, 70.0
+    s._kd.update = lambda h, l, c: (80.0, 70.0)
+    s._macd.update = lambda c: (0.0, 0.0, -1.0)
+    intents = s._decide(100.0, 101.0, 99.0, 100.0)
+    assert any(i.side == -1 for i in intents)
+    assert s._side == 0
+
+
+def test_long_only_decide_exits_on_death_with_positive_macd_bar():
+    s = KdMacdCrypto(config=_config(sizing_mode="fixed"))
+    s._side = 1
+    s._signed_qty_total = 0.01
+    s._prev_k, s._prev_d = 80.0, 70.0
+    s._kd.update = lambda h, l, c: (60.0, 70.0)  # K crosses below D
+    s._macd.update = lambda c: (0.0, 0.0, 1.0)  # bar still > 0
+    intents = s._decide(100.0, 101.0, 99.0, 100.0)
+    assert any(i.side == -1 for i in intents)
+    assert s._side == 0
+
+
+def test_allow_short_decide_ignores_death_while_long():
+    s = KdMacdCrypto(config=_config(sizing_mode="fixed", allow_short=True))
+    s._side = 1
+    s._signed_qty_total = 0.01
+    s._prev_k, s._prev_d = 80.0, 70.0
+    s._kd.update = lambda h, l, c: (60.0, 70.0)
+    s._macd.update = lambda c: (0.0, 0.0, -1.0)
+    intents = s._decide(100.0, 101.0, 99.0, 100.0)
+    assert intents == []
+    assert s._side == 1
+
+
+def test_seed_bracket_one_to_one_atr():
+    s = KdMacdCrypto(config=_config(allow_short=True, atr_period=3, atr_mult=3.0))
+    for _ in range(5):
+        s._atr.update(100.0, 102.0, 98.0, 100.0)
+    s._seed_bracket(1, 100.0)
+    atr = s._atr.value
+    assert atr is not None
+    assert s._stop_price == pytest.approx(100.0 - 3.0 * atr)
+    assert s._tp_price == pytest.approx(100.0 + 3.0 * atr)
+
+
+def test_bracket_intent_stop_hits_before_take_profit():
+    s = KdMacdCrypto(config=_config(allow_short=True, sizing_mode="fixed"))
+    s._side = 1
+    s._signed_qty_total = 0.01
+    s._stop_price = 94.0
+    s._tp_price = 106.0
+    intent = s._bracket_intent(high=107.0, low=93.0)
+    assert intent is not None
+    assert intent.side == -1
+    assert intent.qty == Decimal("0.01")
+
+
+def test_bracket_intent_none_when_long_only():
+    s = KdMacdCrypto(config=_config(sizing_mode="fixed"))
+    s._side = 1
+    s._signed_qty_total = 0.01
+    s._stop_price = 94.0
+    s._tp_price = 106.0
+    assert s._bracket_intent(high=107.0, low=93.0) is None
 
 
 def test_no_exchange_io():
