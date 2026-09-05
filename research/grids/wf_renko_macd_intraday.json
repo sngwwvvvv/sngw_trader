@@ -1,0 +1,12 @@
+{
+  "strategy_path": "sngw_trader.strategies.renko_macd_intraday:RenkoMacdIntraday",
+  "config_path": "sngw_trader.strategies.renko_macd_intraday:RenkoMacdIntradayConfig",
+  "fixed": {
+    "trade_size": "0.02",
+    "allow_short": false,
+    "flatten_daily": true
+  },
+  "grid": {
+    "brick_pct": [0.0005, 0.001, 0.002, 0.004, 0.008]
+  }
+}

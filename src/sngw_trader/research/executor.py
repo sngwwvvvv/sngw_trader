@@ -80,6 +80,7 @@ def run_window(
     start: datetime,
     end: datetime,
     warmup_days: int = 1,
+    quiet: bool = True,
 ):
     bar_type = default_bar_type(instrument_id)
     run_config = build_run_config(
@@ -90,6 +91,7 @@ def run_window(
         end=end,
         dispose_on_completion=False,
         raise_exception=True,
+        quiet=quiet,
     )
     node = BacktestNode(configs=[run_config])
     node.build()

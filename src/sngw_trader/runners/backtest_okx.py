@@ -16,6 +16,7 @@ from nautilus_trader.config import (
     ImportableFillModelConfig,
     ImportableLatencyModelConfig,
     LatencyModelConfig,
+    LoggingConfig,
 )
 from nautilus_trader.model import Bar
 from nautilus_trader.model.enums import AccountType, OmsType
@@ -74,6 +75,7 @@ def build_run_config(
     end: datetime | None = None,
     dispose_on_completion: bool = True,
     raise_exception: bool = False,
+    quiet: bool = False,
 ) -> BacktestRunConfig:
     venue = BacktestVenueConfig(
         name="OKX",
@@ -95,7 +97,11 @@ def build_run_config(
     return BacktestRunConfig(
         venues=[venue],
         data=[data],
-        engine=BacktestEngineConfig(),
+        # quiet: research grid runs log millions of events to stdout at INFO,
+        # which dominates wall time. Live-runner default stays INFO.
+        engine=BacktestEngineConfig(
+            logging=LoggingConfig(bypass_logging=True)
+        ) if quiet else BacktestEngineConfig(),
         dispose_on_completion=dispose_on_completion,
         raise_exception=raise_exception,
     )
