@@ -13,6 +13,7 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from sngw_trader.config import load_settings
+from sngw_trader.data.funding import apply_funding_to_marks, fetch_funding_rates, funding_cost
 from sngw_trader.research import report
 from sngw_trader.research.config import GridSpec, MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult, run_window
@@ -35,6 +36,15 @@ DEFAULT_GRID = GridSpec(
 )
 
 DAY_NS = 86_400_000_000_000
+
+DGT_MC_REASON = "trade iid bootstrap is invalid for DGT (position stays open until upper reset)"
+DGT_ASSUMPTIONS = [
+    "스팟 그리드를 롱온리 퍼프 + 백/워킹 분할로 옮긴 것은 재현이지 동일 전략이 아니다",
+    "1분봉 L1 + 확률적 LIMIT 체결은 틱 북이 아니다. 한 봉 다중 체결을 허용한다",
+    "중간 입금을 막아 저자 IRR과 분모가 다르다",
+    "논문 8bps / Binance spot / 등차 구현을 쓰지 않는다",
+    "이 결과만으로 lifecycle을 backtested 이상으로 올리지 않는다",
+]
 
 
 def load_daily_closes() -> list[tuple[int, float]]:
@@ -154,6 +164,46 @@ def robustness_summary(wf_windows: list[dict]) -> dict:
 
 def _params_for(spec: GridSpec, key: tuple) -> dict[str, object]:
     return dict(zip(sorted(spec.grid), key))
+
+
+def stitch_fills(window_results: list[RunResult | None]) -> list[tuple[int, float, float]]:
+    out: list[tuple[int, float, float]] = []
+    for r in window_results:
+        if r is not None:
+            out.extend(r.fills)
+    out.sort(key=lambda f: f[0])
+    return out
+
+
+def stitch_equity(window_results: list[RunResult | None], initial: float) -> list[tuple[int, float]]:
+    marks: list[tuple[int, float]] = []
+    equity = initial
+    first_ts: int | None = None
+    for r in window_results:
+        if r is None or len(r.equity_marks) < 2:
+            continue
+        window = r.equity_marks
+        if first_ts is None:
+            first_ts = window[0][0]
+        for i in range(1, len(window)):
+            prev, cur = window[i - 1][1], window[i][1]
+            if prev <= 0:
+                continue
+            equity *= cur / prev
+            marks.append((window[i][0], equity))
+    if first_ts is None or not marks:
+        return []
+    return [(first_ts, initial)] + marks
+
+
+def _funding_block(marks, fills, rates, initial: float) -> dict:
+    excluded = compute_equity_metrics(marks, initial)
+    included = compute_equity_metrics(apply_funding_to_marks(marks, fills, rates), initial)
+    return {
+        "excluded": excluded,
+        "included": included,
+        "funding_cost": funding_cost(fills, rates),
+    }
 
 
 def _selection_inputs(
@@ -298,7 +348,6 @@ def main() -> None:
             print(f"[wf] window {window.index} OOS pnl={oos_result.total_pnl:.2f} trades={oos_result.n_trades}")
 
     stitched = stitch_oos(oos_results)
-    mc_oos = bootstrap_trades(stitched, mc_cfg) if len(stitched) >= 2 else None
 
     holdout: RunResult | None = None
     mc_holdout = None
@@ -309,8 +358,28 @@ def main() -> None:
             start=h_start, end=data_end,
             warmup_days=wf_cfg.warmup_days,
         )
-        if holdout.n_trades >= 2:
+
+    if spec.select == "equity_sharpe":
+        mc_oos = None
+        mc_holdout = None
+        mc_report = {"oos": None, "holdout": None, "reason": DGT_MC_REASON}
+        start_ms = int(dt_to_unix_nanos(data_start) / 1_000_000)
+        end_ms = int(dt_to_unix_nanos(data_end) / 1_000_000)
+        rates = fetch_funding_rates("BTC-USDT-SWAP", start_ms, end_ms)
+        oos_fills = stitch_fills(oos_results)
+        oos_marks = stitch_equity(oos_results, mc_cfg.initial_capital)
+        stitched_funding = _funding_block(oos_marks, oos_fills, rates, mc_cfg.initial_capital)
+        holdout_funding = (
+            _funding_block(holdout.equity_marks, holdout.fills, rates, mc_cfg.initial_capital)
+            if holdout is not None else None
+        )
+    else:
+        mc_oos = bootstrap_trades(stitched, mc_cfg) if len(stitched) >= 2 else None
+        if holdout is not None and holdout.n_trades >= 2:
             mc_holdout = bootstrap_trades(holdout.trade_pnls, mc_cfg)
+        mc_report = {"oos": mc_oos, "holdout": mc_holdout}
+        stitched_funding = None
+        holdout_funding = None
     holdout_metrics = run_metrics(holdout, mc_cfg.initial_capital) if holdout else None
 
     wf_report = {
@@ -320,7 +389,6 @@ def main() -> None:
         "holdout_start": h_start.isoformat(),
         "windows": wf_windows,
     }
-    mc_report = {"oos": mc_oos, "holdout": mc_holdout}
     summary = {
         "instrument_id": instrument_id,
         "strategy": strategy_name,
@@ -334,6 +402,11 @@ def main() -> None:
         "mc_holdout": mc_holdout,
         "robustness": robustness_summary(wf_windows),
     }
+    if spec.select == "equity_sharpe":
+        summary["mc_skip_reason"] = DGT_MC_REASON
+        summary["stitched_oos_funding"] = stitched_funding
+        summary["holdout_funding"] = holdout_funding
+        summary["assumptions"] = DGT_ASSUMPTIONS
 
     report.write_reports(out_dir, wf_report, mc_report, summary)
     report.print_summary(summary)

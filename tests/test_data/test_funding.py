@@ -1,6 +1,8 @@
 """Unit tests for funding post-processing. No network."""
 
-from sngw_trader.data.funding import daily_returns, funding_cost, summarize
+import pytest
+
+from sngw_trader.data.funding import apply_funding_to_marks, daily_returns, funding_cost, summarize
 
 
 def test_funding_cost_long_pays_positive_rate():
@@ -27,3 +29,13 @@ def test_daily_returns_and_summary():
     stats = summarize(rets)
     assert stats["sharpe"] < 0  # +1% then -2% day
     assert stats["max_dd"] <= 0.0
+
+
+def test_apply_funding_to_marks_subtracts_cost_at_each_ts():
+    fills = [(0, 1.0, 100.0)]
+    rates = {0: 0.0001}
+    marks = [(0, 10000.0), (8 * 3_600_000 * 1_000_000, 10000.0)]
+    adjusted = apply_funding_to_marks(marks, fills, rates)
+    assert adjusted[0][1] == pytest.approx(10000.0 - 0.01)
+    # second mark still includes the t=0 payment
+    assert adjusted[1][1] == pytest.approx(10000.0 - 0.01)

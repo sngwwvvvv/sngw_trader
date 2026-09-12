@@ -331,6 +331,9 @@ def test_main_selects_equity_sharpe_not_trade(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(
+        wf, "fetch_funding_rates", lambda *a, **k: {0: 0.0001}
+    )
     monkeypatch.setattr(wf, "bootstrap_trades", lambda trades, mc_cfg: {"sims": mc_cfg.n_sims})
     monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
     monkeypatch.setattr(report, "print_summary", lambda summary: None)
@@ -339,3 +342,49 @@ def test_main_selects_equity_sharpe_not_trade(monkeypatch, tmp_path):
     assert wf_report["windows"]
     for w in wf_report["windows"]:
         assert w["selected"] == {"grid_size": 0.02}
+
+
+def test_main_dgt_skips_mc_and_pairs_funding(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01]},
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+
+    filled = RunResult(
+        [10.0, -4.0], [0.01, -0.004], 2, 6.0,
+        equity_marks=[(0, 10000.0), (NS_PER_YEAR // 2, 10100.0), (NS_PER_YEAR, 9900.0)],
+        fills=[(0, 1.0, 100.0)],
+    )
+
+    def fake_run(*a, **k):
+        return filled
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(
+        wf, "fetch_funding_rates",
+        lambda inst, start_ms, end_ms: {0: 0.0001},
+    )
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda *a, **k: (_ for _ in ()).throw(AssertionError("MC must not run")))
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    mc_report = json.loads((tmp_path / "mc_report.json").read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert mc_report["oos"] is None and mc_report["holdout"] is None
+    assert "invalid for DGT" in mc_report["reason"]
+    assert summary["mc_oos"] is None and summary["mc_holdout"] is None
+    assert summary["holdout_funding"]["funding_cost"] == pytest.approx(0.01)
+    assert summary["holdout_funding"]["excluded"]["mdd_ratio"] is not None
+    assert summary["holdout_funding"]["included"]["mdd_ratio"] is not None
+    # 2 OOS windows x same fake fill (ts=0, long 1.0 @ 100) -> 0.0001 * 2 * 100
+    assert summary["stitched_oos_funding"]["funding_cost"] == pytest.approx(0.02)
+    assert "스팟 그리드를 롱온리 퍼프" in summary["assumptions"][0]
+    assert len(summary["assumptions"]) == 5
