@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model import Bar, BarType, InstrumentId
+from nautilus_trader.model.enums import OrderSide, TimeInForce
+from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.objects import Currency
+from nautilus_trader.trading import Strategy
+
 
 def geometric_levels(center: Decimal, k: Decimal, h: int) -> list[Decimal]:
     if h < 0:
@@ -145,3 +152,166 @@ class GridBook:
         self.active = False
         if not self.reset_enabled:
             self.stopped = True
+
+
+class DynamicGridConfig(StrategyConfig, frozen=True, kw_only=True):  # ponytail: kw_only - StrategyConfig's optional fields precede ours, msgspec forbids required-after-optional
+    instrument_id: InstrumentId
+    bar_type: BarType
+    grid_size: float
+    grid_numbers_half: int
+    reset_enabled: bool = True
+    close_positions_on_stop: bool = False
+    use_hyphens_in_client_order_ids: bool = False
+    order_id_tag: str = "DGT"
+
+
+class DynamicGrid(Strategy):
+    def __init__(self, config: DynamicGridConfig) -> None:
+        super().__init__(config)
+        self._book = GridBook(
+            h=config.grid_numbers_half,
+            k=Decimal(str(config.grid_size)),
+            reset_enabled=config.reset_enabled,
+        )
+        self._in_reset = False
+        self._opening = False
+        self._last_price: Decimal | None = None
+
+    def on_start(self) -> None:
+        self.subscribe_bars(self.config.bar_type)
+
+    def on_stop(self) -> None:
+        self.cancel_all_orders(self.config.instrument_id)
+        if self.config.close_positions_on_stop:
+            self.close_all_positions(self.config.instrument_id)
+
+    def on_bar(self, bar: Bar) -> None:
+        if bar.bar_type != self.config.bar_type:
+            return
+        price = Decimal(str(bar.close))
+        self._last_price = price
+        if self._book.stopped:
+            return
+        if not self._book.active:
+            self._try_start(price)
+            return
+        if self._book.should_reset_upper(price):
+            self._reset_upper(price)
+            return
+        if self._book.should_reset_lower(price):
+            self._reset_lower(price)
+            return
+        self._place_ladder()
+
+    def on_order_filled(self, event: OrderFilled) -> None:
+        if event.instrument_id != self.config.instrument_id:
+            return
+        qty = event.last_qty.as_decimal()
+        px = event.last_px.as_decimal()
+        if self._opening:
+            self._opening = False
+            if self._book.active and not self._book.stopped:
+                self._place_ladder()
+            return
+        if event.order_side == OrderSide.BUY:
+            self._book.apply_buy(qty, px)
+        else:
+            self._book.apply_sell(qty, px)
+        if self._in_reset or self._book.stopped or not self._book.active:
+            return
+        self.cancel_all_orders(self.config.instrument_id)
+        self._place_ladder()
+
+    def _free_usdt(self) -> Decimal:
+        account = self.cache.account_for_venue(self.config.instrument_id.venue)
+        if account is None:
+            return Decimal("0")
+        bal = account.balance(Currency.from_str("USDT"))
+        if bal is None:
+            return Decimal("0")
+        return bal.free.as_decimal()
+
+    def _instrument(self):
+        return self.cache.instrument(self.config.instrument_id)
+
+    def _min_qty(self, instrument) -> Decimal:
+        raw = getattr(instrument, "min_quantity", None)
+        if raw is None:
+            return Decimal("0")
+        return raw.as_decimal() if hasattr(raw, "as_decimal") else Decimal(str(raw))
+
+    def _try_start(self, price: Decimal) -> None:
+        instrument = self._instrument()
+        if instrument is None:
+            self.log.error(f"Instrument not in cache: {self.config.instrument_id}")
+            return
+        m = self._free_usdt()
+        min_qty = self._min_qty(instrument)
+        probe = (m / 2) / price if price != 0 else Decimal("0")
+        q = quantize_qty(instrument, probe)
+        if q is None:
+            return
+        if not self._book.open_grid(m, price, min_qty):
+            return
+        self._opening = True
+        self.submit_order(
+            self.order_factory.market(self.config.instrument_id, OrderSide.BUY, q)
+        )
+
+    def _place_ladder(self) -> None:
+        instrument = self._instrument()
+        if instrument is None or self._last_price is None or not self._book.active:
+            return
+        sells, buys = self._book.working_orders(self._last_price)
+        for px, qty in sells:
+            self._submit_limit(instrument, OrderSide.SELL, px, qty, reduce_only=True)
+        for px, qty in buys:
+            self._submit_limit(instrument, OrderSide.BUY, px, qty, reduce_only=False)
+
+    def _submit_limit(self, instrument, side: OrderSide, px: Decimal, qty: Decimal, *, reduce_only: bool) -> None:
+        price = quantize_price(instrument, px)
+        q = quantize_qty(instrument, qty)
+        if price is None or q is None:
+            return
+        self.submit_order(
+            self.order_factory.limit(
+                instrument_id=self.config.instrument_id,
+                order_side=side,
+                quantity=q,
+                price=price,
+                time_in_force=TimeInForce.GTC,
+                reduce_only=reduce_only,
+            )
+        )
+
+    def _reset_upper(self, price: Decimal) -> None:
+        self._in_reset = True
+        try:
+            self.cancel_all_orders(self.config.instrument_id)
+            instrument = self._instrument()
+            if instrument is not None and self._book.grid_qty > 0:
+                q = quantize_qty(instrument, self._book.grid_qty)
+                if q is not None:
+                    self.submit_order(
+                        self.order_factory.market(
+                            self.config.instrument_id,
+                            OrderSide.SELL,
+                            q,
+                            reduce_only=True,
+                        )
+                    )
+            self._book.reset_upper()
+            if self._book.can_open():
+                self._try_start(price)
+        finally:
+            self._in_reset = False
+
+    def _reset_lower(self, price: Decimal) -> None:
+        self._in_reset = True
+        try:
+            self.cancel_all_orders(self.config.instrument_id)
+            self._book.reset_lower()
+            if self._book.can_open():
+                self._try_start(price)
+        finally:
+            self._in_reset = False

@@ -182,3 +182,37 @@ def test_working_orders_only_remaining_side_of_last_price():
     assert all(px > b.levels[b.h + 1] for px, _ in sells_up)
     assert len(sells_up) == 2
     assert all(px < b.levels[b.h + 1] for px, _ in buys_up)
+
+
+from nautilus_trader.model import BarType, InstrumentId
+
+from sngw_trader.strategies.dynamic_grid import DynamicGrid, DynamicGridConfig
+
+
+def test_config_defaults_and_okx_ids():
+    cfg = DynamicGridConfig(
+        instrument_id=InstrumentId.from_str("BTC-USDT-SWAP.OKX"),
+        bar_type=BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+        grid_size=0.01,
+        grid_numbers_half=3,
+    )
+    assert str(cfg.instrument_id).endswith(".OKX")
+    assert "1-MINUTE-LAST-EXTERNAL" in str(cfg.bar_type)
+    assert cfg.reset_enabled is True
+    assert cfg.close_positions_on_stop is False
+    assert cfg.use_hyphens_in_client_order_ids is False
+    assert cfg.order_id_tag == "DGT"
+    s = DynamicGrid(config=cfg)
+    assert s._book.h == 3
+    assert s._book.k == Decimal("0.01")
+    assert s._book.reset_enabled is True
+    assert s._in_reset is False
+    assert s._opening is False
+
+
+def test_strategy_module_has_no_runner_imports():
+    from pathlib import Path
+
+    text = Path("src/sngw_trader/strategies/dynamic_grid.py").read_text(encoding="utf-8")
+    for token in ("BacktestNode", "TradingNode", "OKXDataClientFactory", "ccxt", "python-okx"):
+        assert token not in text
