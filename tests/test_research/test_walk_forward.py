@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import sngw_trader.research.report as report
-from sngw_trader.research.config import MCConfig, WalkForwardConfig
+from sngw_trader.research.config import GridSpec, MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult
 from sngw_trader.research.metrics import NS_PER_YEAR
 from sngw_trader.research.select import sharpe_from_trades
@@ -13,6 +13,7 @@ from sngw_trader.research.walk_forward import (
     bh_metrics,
     build_wf_configs,
     load_grid,
+    oneshot_keys,
     oos_is_sharpe_ratio,
     robustness_summary,
     run_metrics,
@@ -388,3 +389,71 @@ def test_main_dgt_skips_mc_and_pairs_funding(monkeypatch, tmp_path):
     assert summary["stitched_oos_funding"]["funding_cost"] == pytest.approx(0.02)
     assert "스팟 그리드를 롱온리 퍼프" in summary["assumptions"][0]
     assert len(summary["assumptions"]) == 5
+
+
+def test_oneshot_keys_keeps_reset_true_only():
+    spec = GridSpec(
+        strategy_path="sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        config_path="sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        fixed={},
+        grid={
+            "grid_size": [0.01, 0.02],
+            "grid_numbers_half": [3],
+            "reset_enabled": [True, False],
+        },
+        select="equity_sharpe",
+    )
+    keys = oneshot_keys(spec)
+    axes = sorted(spec.grid)
+    assert len(keys) == 2
+    idx = axes.index("reset_enabled")
+    assert all(k[idx] is True for k in keys)
+
+
+def test_oneshot_keys_without_reset_axis_keeps_all():
+    spec = GridSpec("x:Y", "x:C", {}, {"grid_size": [0.01, 0.02]})
+    assert len(oneshot_keys(spec)) == 2
+
+
+def test_main_oneshot_skips_windows(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {
+            "grid_size": [0.01, 0.02],
+            "reset_enabled": [True, False],
+        },
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    monkeypatch.setenv("WF_ONESHOT", "1")
+
+    calls: list[dict] = []
+
+    def fake_run(*a, **k):
+        params = k.get("params") or {}
+        calls.append(params)
+        return _FAKE_RESULT
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no MC")))
+    monkeypatch.setattr(wf, "fetch_funding_rates", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no funding fetch")))
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    wf_report = json.loads((tmp_path / "wf_report.json").read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert wf_report["label"] == "IS-only"
+    assert "windows" not in wf_report
+    assert len(calls) == 2
+    assert all(c["reset_enabled"] is True for c in calls)
+    assert {c["grid_size"] for c in calls} == {0.01, 0.02}
+    assert summary["label"] == "IS-only"
+    assert summary["n_cells"] == 2
+    assert "holdout" not in summary
+    assert "stitched_oos_funding" not in summary

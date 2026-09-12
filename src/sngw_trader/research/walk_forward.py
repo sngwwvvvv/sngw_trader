@@ -248,6 +248,59 @@ def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) ->
     return results
 
 
+def oneshot_keys(spec: GridSpec) -> list[tuple]:
+    keys = param_keys(spec.grid)
+    if "reset_enabled" not in spec.grid:
+        return keys
+    idx = sorted(spec.grid).index("reset_enabled")
+    return [k for k in keys if k[idx] is True]
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def run_oneshot(settings, spec, wf_cfg, mc_cfg, data_start, data_end, days, out_dir) -> None:
+    instrument_id = settings.instrument_id_str
+    catalog_path = str(settings.catalog_path)
+    cells = []
+    for key in oneshot_keys(spec):
+        params = _params_for(spec, key)
+        res = run_window(
+            catalog_path, instrument_id, settings=settings, spec=spec,
+            params=params, start=data_start, end=data_end,
+            warmup_days=wf_cfg.warmup_days,
+        )
+        cells.append({
+            "params": params,
+            "n_trades": res.n_trades,
+            "total_pnl": res.total_pnl,
+            "metrics": run_metrics(res, mc_cfg.initial_capital),
+            "benchmark": bh_metrics(days, data_start, data_end),
+        })
+        print(f"[oneshot] {params} trades={res.n_trades}")
+    strategy_name = spec.strategy_path.rsplit(":", 1)[-1]
+    wf_report = {
+        "label": "IS-only",
+        "instrument_id": instrument_id,
+        "data_start": data_start.isoformat(),
+        "data_end": data_end.isoformat(),
+        "cells": cells,
+    }
+    mc_report = {"oos": None, "holdout": None, "reason": DGT_MC_REASON}
+    summary = {
+        "label": "IS-only",
+        "strategy": strategy_name,
+        "instrument_id": instrument_id,
+        "n_cells": len(cells),
+        "cells": cells,
+        "benchmark": bh_metrics(days, data_start, data_end),
+        "assumptions": DGT_ASSUMPTIONS,
+    }
+    report.write_reports(out_dir, wf_report, mc_report, summary)
+    report.print_summary(summary)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw is not None else default
@@ -284,6 +337,11 @@ def main() -> None:
     bar_type = default_bar_type(instrument_id)
 
     data_start, data_end = detect_data_range(catalog_path, bar_type)
+    if _env_flag("WF_ONESHOT"):
+        days = load_daily_closes()
+        out_dir = report.run_dir(spec.strategy_path.rsplit(":", 1)[-1])
+        run_oneshot(settings, spec, wf_cfg, mc_cfg, data_start, data_end, days, out_dir)
+        return
     windows = compute_windows(
         data_start, data_end, wf_cfg.is_months, wf_cfg.oos_months, wf_cfg.holdout_months,
     )
