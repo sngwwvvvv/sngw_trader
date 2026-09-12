@@ -1,0 +1,11 @@
+{
+  "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+  "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+  "select": "equity_sharpe",
+  "fixed": {},
+  "grid": {
+    "grid_size": [0.005, 0.01, 0.02, 0.05],
+    "grid_numbers_half": [3, 5, 10],
+    "reset_enabled": [true, false]
+  }
+}

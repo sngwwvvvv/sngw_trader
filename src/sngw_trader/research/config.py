@@ -13,6 +13,7 @@ class GridSpec:
     config_path: str  # "pkg.module:ConfigClassName"
     fixed: dict[str, object]
     grid: dict[str, list]
+    select: str | None = None
 
 
 @dataclass(frozen=True)

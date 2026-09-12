@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import sngw_trader.research.report as report
-from sngw_trader.research.config import MCConfig, WalkForwardConfig
+from sngw_trader.research.config import GridSpec, MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult
 from sngw_trader.research.metrics import NS_PER_YEAR
 from sngw_trader.research.select import sharpe_from_trades
@@ -13,6 +13,7 @@ from sngw_trader.research.walk_forward import (
     bh_metrics,
     build_wf_configs,
     load_grid,
+    oneshot_keys,
     oos_is_sharpe_ratio,
     robustness_summary,
     run_metrics,
@@ -31,9 +32,20 @@ def test_stitch_empty():
 
 def test_load_grid_default(monkeypatch):
     monkeypatch.delenv("WF_GRID_PATH", raising=False)
+    monkeypatch.delenv("WF_SIZING_MODE", raising=False)
     spec = load_grid()
     assert spec.strategy_path.endswith("ema_cross:EMACross")
-    assert spec.grid == {"fast_ema_period": [10, 20, 30], "slow_ema_period": [20, 50, 100]}
+    assert spec.grid == {}
+    assert spec.fixed["trade_size"] == "0.10"
+    assert spec.fixed["fast_ema_period"] == 20
+    assert spec.fixed["slow_ema_period"] == 50
+    assert spec.fixed["sizing_mode"] == "vol_target"
+
+
+def test_load_grid_selects_sizing_mode(monkeypatch):
+    monkeypatch.delenv("WF_GRID_PATH", raising=False)
+    monkeypatch.setenv("WF_SIZING_MODE", "fixed")
+    assert load_grid().fixed["sizing_mode"] == "fixed"
 
 
 def test_load_grid_from_json(tmp_path, monkeypatch):
@@ -50,6 +62,7 @@ def test_load_grid_from_json(tmp_path, monkeypatch):
     spec = load_grid()
     assert spec.fixed == {"trade_size": "0.02"}
     assert spec.grid == {"fast_ema_period": [5, 10]}
+    assert spec.select is None
 
 
 def test_env_override_configs(monkeypatch):
@@ -58,7 +71,8 @@ def test_env_override_configs(monkeypatch):
     wf, mc = build_wf_configs()
     assert isinstance(wf, WalkForwardConfig)
     assert isinstance(mc, MCConfig)
-    assert wf.min_trades == 30
+    assert wf.min_trades == 1
+    assert wf.warmup_days == 61
     assert mc.n_sims == 1000
 
     monkeypatch.setenv("WF_MIN_TRADES", "99")
@@ -103,15 +117,16 @@ def test_robustness_summary_aggregates_and_excludes():
     windows = [
         {"oos_is_sharpe_ratio": 1.0,
          "oos_metrics": {"trade": None,
-                         "equity": {"sortino": 0.2, "calmar": None, "mdd_ratio": 0.1}}},
+                         "equity": {"sharpe": 0.4, "sortino": 0.2, "calmar": None, "mdd_ratio": 0.1}}},
         {"oos_is_sharpe_ratio": None,
          "oos_metrics": {"trade": None,
-                         "equity": {"sortino": None, "calmar": 1.5, "mdd_ratio": 0.3}}},
+                         "equity": {"sharpe": None, "sortino": None, "calmar": 1.5, "mdd_ratio": 0.3}}},
         {"oos_is_sharpe_ratio": None, "oos_metrics": None},
     ]
     r = robustness_summary(windows)
     assert r["oos_is_sharpe_ratios"] == [1.0]
     assert r["n_excluded_ratio_windows"] == 2
+    assert r["oos_sharpe"] == {"mean": pytest.approx(0.4), "n_excluded": 1}
     assert r["oos_sortino"] == {"mean": pytest.approx(0.2), "n_excluded": 1}
     assert r["oos_calmar"] == {"mean": pytest.approx(1.5), "n_excluded": 1}
     assert r["oos_mdd_ratio"] == {"mean": pytest.approx(0.2), "max": pytest.approx(0.3), "n_excluded": 0}
@@ -243,3 +258,202 @@ def test_main_no_eligible_combo_yields_null_metrics(monkeypatch, tmp_path):
     assert summary["holdout"] is None
     assert summary["robustness"]["oos_is_sharpe_ratios"] == []
     assert summary["robustness"]["n_excluded_ratio_windows"] == len(wf_report["windows"])
+
+
+def test_load_grid_reads_select(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01], "reset_enabled": [True]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    spec = load_grid()
+    assert spec.select == "equity_sharpe"
+    assert spec.grid["grid_size"] == [0.01]
+
+
+def test_load_grid_json_without_select_is_none(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.example.ema_cross:EMACross",
+        "config_path": "sngw_trader.strategies.example.ema_cross:EMACrossConfig",
+        "fixed": {"trade_size": "0.02"},
+        "grid": {"fast_ema_period": [5, 10]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    assert load_grid().select is None
+
+
+def test_load_grid_rejects_unknown_select(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "x:Y",
+        "config_path": "x:C",
+        "select": "trade_sharpe",
+        "fixed": {},
+        "grid": {"a": [1]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    with pytest.raises(ValueError, match="equity_sharpe"):
+        load_grid()
+
+
+def test_main_selects_equity_sharpe_not_trade(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01, 0.02]},
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+
+    def fake_run(*a, **k):
+        params = k.get("params") or (a[4] if len(a) > 4 else {})
+        if params.get("grid_size") == 0.01:
+            return RunResult(
+                [100.0, 100.0], [0.5, 0.5], 2, 200.0,
+                equity_marks=[(0, 10000.0), (NS_PER_YEAR, 0.0)],
+            )
+        return RunResult(
+            [1.0, -2.0], [0.01, -0.02], 2, -1.0,
+            equity_marks=[
+                (0, 10000.0),
+                (NS_PER_YEAR // 2, 11000.0),
+                (NS_PER_YEAR, 12000.0),
+            ],
+        )
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(
+        wf, "fetch_funding_rates", lambda *a, **k: {0: 0.0001}
+    )
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda trades, mc_cfg: {"sims": mc_cfg.n_sims})
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    wf_report = json.loads((tmp_path / "wf_report.json").read_text(encoding="utf-8"))
+    assert wf_report["windows"]
+    for w in wf_report["windows"]:
+        assert w["selected"] == {"grid_size": 0.02}
+
+
+def test_main_dgt_skips_mc_and_pairs_funding(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01]},
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+
+    filled = RunResult(
+        [10.0, -4.0], [0.01, -0.004], 2, 6.0,
+        equity_marks=[(0, 10000.0), (NS_PER_YEAR // 2, 10100.0), (NS_PER_YEAR, 9900.0)],
+        fills=[(0, 1.0, 100.0)],
+    )
+
+    def fake_run(*a, **k):
+        return filled
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(
+        wf, "fetch_funding_rates",
+        lambda inst, start_ms, end_ms: {0: 0.0001},
+    )
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda *a, **k: (_ for _ in ()).throw(AssertionError("MC must not run")))
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    mc_report = json.loads((tmp_path / "mc_report.json").read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert mc_report["oos"] is None and mc_report["holdout"] is None
+    assert "invalid for DGT" in mc_report["reason"]
+    assert summary["mc_oos"] is None and summary["mc_holdout"] is None
+    assert summary["holdout_funding"]["funding_cost"] == pytest.approx(0.01)
+    assert summary["holdout_funding"]["excluded"]["mdd_ratio"] is not None
+    assert summary["holdout_funding"]["included"]["mdd_ratio"] is not None
+    # 2 OOS windows x same fake fill (ts=0, long 1.0 @ 100) -> 0.0001 * 2 * 100
+    assert summary["stitched_oos_funding"]["funding_cost"] == pytest.approx(0.02)
+    assert "스팟 그리드를 롱온리 퍼프" in summary["assumptions"][0]
+    assert len(summary["assumptions"]) == 5
+
+
+def test_oneshot_keys_keeps_reset_true_only():
+    spec = GridSpec(
+        strategy_path="sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        config_path="sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        fixed={},
+        grid={
+            "grid_size": [0.01, 0.02],
+            "grid_numbers_half": [3],
+            "reset_enabled": [True, False],
+        },
+        select="equity_sharpe",
+    )
+    keys = oneshot_keys(spec)
+    axes = sorted(spec.grid)
+    assert len(keys) == 2
+    idx = axes.index("reset_enabled")
+    assert all(k[idx] is True for k in keys)
+
+
+def test_oneshot_keys_without_reset_axis_keeps_all():
+    spec = GridSpec("x:Y", "x:C", {}, {"grid_size": [0.01, 0.02]})
+    assert len(oneshot_keys(spec)) == 2
+
+
+def test_main_oneshot_skips_windows(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {
+            "grid_size": [0.01, 0.02],
+            "reset_enabled": [True, False],
+        },
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    monkeypatch.setenv("WF_ONESHOT", "1")
+
+    calls: list[dict] = []
+
+    def fake_run(*a, **k):
+        params = k.get("params") or {}
+        calls.append(params)
+        return _FAKE_RESULT
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no MC")))
+    monkeypatch.setattr(wf, "fetch_funding_rates", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no funding fetch")))
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    wf_report = json.loads((tmp_path / "wf_report.json").read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert wf_report["label"] == "IS-only"
+    assert "windows" not in wf_report
+    assert len(calls) == 2
+    assert all(c["reset_enabled"] is True for c in calls)
+    assert {c["grid_size"] for c in calls} == {0.01, 0.02}
+    assert summary["label"] == "IS-only"
+    assert summary["n_cells"] == 2
+    assert "holdout" not in summary
+    assert "stitched_oos_funding" not in summary

@@ -87,7 +87,7 @@ def _dt_to_ns(dt_str: str) -> int:
     return int(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").timestamp()) * 1_000_000_000
 
 
-def _parse_fills(rows: list[dict]) -> list[tuple[int, float, float]]:
+def parse_fills(rows: list[dict]) -> list[tuple[int, float, float]]:
     """Map fills CSV rows to (ts_ns, signed_qty, px). Defensive on column names."""
     if not rows:
         return []
@@ -115,13 +115,29 @@ def _parse_fills(rows: list[dict]) -> list[tuple[int, float, float]]:
     return fills
 
 
+# backward-compatible alias
+_parse_fills = parse_fills
+
+
+def apply_funding_to_marks(
+    marks: list[tuple[int, float]],
+    fills: list[tuple[int, float, float]],
+    rates: dict[int, float],
+) -> list[tuple[int, float]]:
+    out: list[tuple[int, float]] = []
+    for ts, eq in marks:
+        cut = {t: r for t, r in rates.items() if t * 1_000_000 <= ts}
+        out.append((ts, eq - funding_cost(fills, cut)))
+    return out
+
+
 def main() -> None:
     import csv
 
     fills_path = Path("logs/fills.csv")
     with fills_path.open() as f:
         rows = list(csv.DictReader(f))
-    fills = _parse_fills(rows)
+    fills = parse_fills(rows)
     if not fills:
         print("no fills parsed")
         return

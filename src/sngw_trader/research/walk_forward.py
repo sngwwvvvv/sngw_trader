@@ -13,6 +13,7 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from sngw_trader.config import load_settings
+from sngw_trader.data.funding import apply_funding_to_marks, fetch_funding_rates, funding_cost
 from sngw_trader.research import report
 from sngw_trader.research.config import GridSpec, MCConfig, WalkForwardConfig
 from sngw_trader.research.executor import RunResult, run_window
@@ -25,11 +26,25 @@ from sngw_trader.runners.backtest_okx import default_bar_type
 DEFAULT_GRID = GridSpec(
     strategy_path="sngw_trader.strategies.example.ema_cross:EMACross",
     config_path="sngw_trader.strategies.example.ema_cross:EMACrossConfig",
-    fixed={"trade_size": "0.01"},
-    grid={"fast_ema_period": [10, 20, 30], "slow_ema_period": [20, 50, 100]},
+    fixed={
+        "trade_size": "0.10",
+        "fast_ema_period": 20,
+        "slow_ema_period": 50,
+        "sizing_mode": "vol_target",
+    },
+    grid={},
 )
 
 DAY_NS = 86_400_000_000_000
+
+DGT_MC_REASON = "trade iid bootstrap is invalid for DGT (position stays open until upper reset)"
+DGT_ASSUMPTIONS = [
+    "스팟 그리드를 롱온리 퍼프 + 백/워킹 분할로 옮긴 것은 재현이지 동일 전략이 아니다",
+    "1분봉 L1 + 확률적 LIMIT 체결은 틱 북이 아니다. 한 봉 다중 체결을 허용한다",
+    "중간 입금을 막아 저자 IRR과 분모가 다르다",
+    "논문 8bps / Binance spot / 등차 구현을 쓰지 않는다",
+    "이 결과만으로 lifecycle을 backtested 이상으로 올리지 않는다",
+]
 
 
 def load_daily_closes() -> list[tuple[int, float]]:
@@ -56,13 +71,25 @@ def bh_metrics(
 def load_grid() -> GridSpec:
     path = os.environ.get("WF_GRID_PATH")
     if not path:
-        return DEFAULT_GRID
+        mode = os.environ.get("WF_SIZING_MODE", DEFAULT_GRID.fixed["sizing_mode"])
+        if mode not in {"fixed", "vol_target"}:
+            raise ValueError(f"WF_SIZING_MODE must be fixed or vol_target, got {mode!r}")
+        return GridSpec(
+            strategy_path=DEFAULT_GRID.strategy_path,
+            config_path=DEFAULT_GRID.config_path,
+            fixed={**DEFAULT_GRID.fixed, "sizing_mode": mode},
+            grid={},
+        )
     data = json.loads(Path(path).read_text())
+    select = data.get("select")
+    if select is not None and select != "equity_sharpe":
+        raise ValueError(f"GridSpec.select must be absent or 'equity_sharpe', got {select!r}")
     return GridSpec(
         strategy_path=data["strategy_path"],
         config_path=data["config_path"],
         fixed=data.get("fixed", {}),
         grid=data["grid"],
+        select=select,
     )
 
 
@@ -128,6 +155,7 @@ def robustness_summary(wf_windows: list[dict]) -> dict:
         "oos_is_sharpe_ratios": ratios,
         "n_excluded_ratio_windows":
             sum(1 for w in wf_windows if w.get("oos_is_sharpe_ratio") is None),
+        "oos_sharpe": agg("sharpe", with_max=False),
         "oos_sortino": agg("sortino", with_max=False),
         "oos_calmar": agg("calmar", with_max=False),
         "oos_mdd_ratio": agg("mdd_ratio", with_max=True),
@@ -138,13 +166,77 @@ def _params_for(spec: GridSpec, key: tuple) -> dict[str, object]:
     return dict(zip(sorted(spec.grid), key))
 
 
-def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) -> tuple[dict, dict]:
+def stitch_fills(window_results: list[RunResult | None]) -> list[tuple[int, float, float]]:
+    out: list[tuple[int, float, float]] = []
+    for r in window_results:
+        if r is not None:
+            out.extend(r.fills)
+    out.sort(key=lambda f: f[0])
+    return out
+
+
+def stitch_equity(window_results: list[RunResult | None], initial: float) -> list[tuple[int, float]]:
+    marks: list[tuple[int, float]] = []
+    equity = initial
+    first_ts: int | None = None
+    for r in window_results:
+        if r is None or len(r.equity_marks) < 2:
+            continue
+        window = r.equity_marks
+        if first_ts is None:
+            first_ts = window[0][0]
+        for i in range(1, len(window)):
+            prev, cur = window[i - 1][1], window[i][1]
+            if prev <= 0:
+                continue
+            equity *= cur / prev
+            marks.append((window[i][0], equity))
+    if first_ts is None or not marks:
+        return []
+    return [(first_ts, initial)] + marks
+
+
+def _funding_block(marks, fills, rates, initial: float) -> dict:
+    excluded = compute_equity_metrics(marks, initial)
+    included = compute_equity_metrics(apply_funding_to_marks(marks, fills, rates), initial)
+    return {
+        "excluded": excluded,
+        "included": included,
+        "funding_cost": funding_cost(fills, rates),
+    }
+
+
+def _selection_inputs(
+    spec: GridSpec,
+    results: dict[tuple, RunResult],
+    initial_capital: float,
+    min_trades: int,
+) -> tuple[dict[tuple, float], dict[tuple, int], int]:
+    sharpes: dict[tuple, float] = {}
+    gates: dict[tuple, int] = {}
+    if spec.select == "equity_sharpe":
+        for key, res in results.items():
+            metrics = compute_equity_metrics(res.equity_marks, initial_capital)
+            if metrics is None or metrics["sharpe"] is None:
+                sharpes[key] = 0.0
+                gates[key] = 0
+            else:
+                sharpes[key] = metrics["sharpe"]
+                gates[key] = len(res.equity_marks)
+        return sharpes, gates, 2
+    for key, res in results.items():
+        sharpes[key] = sharpe_from_trades(res.trade_returns)
+        gates[key] = res.n_trades
+    return sharpes, gates, min_trades
+
+
+def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) -> dict[tuple, RunResult]:
     catalog_path = str(settings.catalog_path)
     instrument_id = settings.instrument_id_str
     axes = sorted(spec.grid)
     results: dict[tuple, RunResult] = {}
-    sharpes: dict[tuple, float] = {}
-    for i, key in enumerate(param_keys(spec.grid), 1):
+    keys = param_keys(spec.grid)
+    for i, key in enumerate(keys, 1):
         res = run_window(
             catalog_path, instrument_id, settings=settings, spec=spec,
             params=dict(zip(axes, key)),
@@ -152,10 +244,61 @@ def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) ->
             warmup_days=wf_cfg.warmup_days,
         )
         results[key] = res
-        sharpes[key] = sharpe_from_trades(res.trade_returns)
-        print(f"[wf] window {window.index} IS {i}/{len(param_keys(spec.grid))} "
-              f"{dict(zip(axes, key))} sharpe={sharpes[key]:.2f} trades={res.n_trades}")
-    return results, sharpes
+        print(f"[wf] window {window.index} IS {i}/{len(keys)} {dict(zip(axes, key))} trades={res.n_trades}")
+    return results
+
+
+def oneshot_keys(spec: GridSpec) -> list[tuple]:
+    keys = param_keys(spec.grid)
+    if "reset_enabled" not in spec.grid:
+        return keys
+    idx = sorted(spec.grid).index("reset_enabled")
+    return [k for k in keys if k[idx] is True]
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def run_oneshot(settings, spec, wf_cfg, mc_cfg, data_start, data_end, days, out_dir) -> None:
+    instrument_id = settings.instrument_id_str
+    catalog_path = str(settings.catalog_path)
+    cells = []
+    for key in oneshot_keys(spec):
+        params = _params_for(spec, key)
+        res = run_window(
+            catalog_path, instrument_id, settings=settings, spec=spec,
+            params=params, start=data_start, end=data_end,
+            warmup_days=wf_cfg.warmup_days,
+        )
+        cells.append({
+            "params": params,
+            "n_trades": res.n_trades,
+            "total_pnl": res.total_pnl,
+            "metrics": run_metrics(res, mc_cfg.initial_capital),
+            "benchmark": bh_metrics(days, data_start, data_end),
+        })
+        print(f"[oneshot] {params} trades={res.n_trades}")
+    strategy_name = spec.strategy_path.rsplit(":", 1)[-1]
+    wf_report = {
+        "label": "IS-only",
+        "instrument_id": instrument_id,
+        "data_start": data_start.isoformat(),
+        "data_end": data_end.isoformat(),
+        "cells": cells,
+    }
+    mc_report = {"oos": None, "holdout": None, "reason": DGT_MC_REASON}
+    summary = {
+        "label": "IS-only",
+        "strategy": strategy_name,
+        "instrument_id": instrument_id,
+        "n_cells": len(cells),
+        "cells": cells,
+        "benchmark": bh_metrics(days, data_start, data_end),
+        "assumptions": DGT_ASSUMPTIONS,
+    }
+    report.write_reports(out_dir, wf_report, mc_report, summary)
+    report.print_summary(summary)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -173,8 +316,8 @@ def build_wf_configs() -> tuple[WalkForwardConfig, MCConfig]:
         is_months=_env_int("WF_IS_MONTHS", 6),
         oos_months=_env_int("WF_OOS_MONTHS", 3),
         holdout_months=_env_int("WF_HOLDOUT_MONTHS", 6),
-        warmup_days=_env_int("WF_WARMUP_DAYS", 1),
-        min_trades=_env_int("WF_MIN_TRADES", 30),
+        warmup_days=_env_int("WF_WARMUP_DAYS", 61),
+        min_trades=_env_int("WF_MIN_TRADES", 1),
     )
     mc_cfg = MCConfig(
         n_sims=_env_int("MC_ITERS", 1000),
@@ -194,6 +337,11 @@ def main() -> None:
     bar_type = default_bar_type(instrument_id)
 
     data_start, data_end = detect_data_range(catalog_path, bar_type)
+    if _env_flag("WF_ONESHOT"):
+        days = load_daily_closes()
+        out_dir = report.run_dir(spec.strategy_path.rsplit(":", 1)[-1])
+        run_oneshot(settings, spec, wf_cfg, mc_cfg, data_start, data_end, days, out_dir)
+        return
     windows = compute_windows(
         data_start, data_end, wf_cfg.is_months, wf_cfg.oos_months, wf_cfg.holdout_months,
     )
@@ -210,12 +358,11 @@ def main() -> None:
     last_params: tuple | None = None
 
     for window in windows:
-        grid_results, sharpes = _run_is_grid(settings, spec, window, wf_cfg)
-        best = select_best(
-            spec.grid, sharpes,
-            {k: r.n_trades for k, r in grid_results.items()},
-            wf_cfg.min_trades,
+        grid_results = _run_is_grid(settings, spec, window, wf_cfg)
+        sharpes, gates, min_gate = _selection_inputs(
+            spec, grid_results, mc_cfg.initial_capital, wf_cfg.min_trades,
         )
+        best = select_best(spec.grid, sharpes, gates, min_gate)
         oos_result: RunResult | None = None
         if best is not None:
             last_params = best
@@ -228,8 +375,14 @@ def main() -> None:
         oos_results.append(oos_result)
         oos_metrics = run_metrics(oos_result, mc_cfg.initial_capital) if oos_result else None
         is_metrics = run_metrics(grid_results[best], mc_cfg.initial_capital) if best is not None else None
-        ratio = (oos_is_sharpe_ratio(sharpes[best], oos_result)
-                 if best is not None and oos_result is not None else None)
+        if best is not None and oos_result is not None:
+            if spec.select == "equity_sharpe":
+                oos_s = None if oos_metrics is None or oos_metrics["equity"] is None else oos_metrics["equity"]["sharpe"]
+                ratio = None if sharpes[best] <= 0 or oos_s is None else oos_s / sharpes[best]
+            else:
+                ratio = oos_is_sharpe_ratio(sharpes[best], oos_result)
+        else:
+            ratio = None
         wf_windows.append({
             "index": window.index,
             "is": {"start": window.is_start.isoformat(), "end": window.is_end.isoformat()},
@@ -253,7 +406,6 @@ def main() -> None:
             print(f"[wf] window {window.index} OOS pnl={oos_result.total_pnl:.2f} trades={oos_result.n_trades}")
 
     stitched = stitch_oos(oos_results)
-    mc_oos = bootstrap_trades(stitched, mc_cfg) if len(stitched) >= 2 else None
 
     holdout: RunResult | None = None
     mc_holdout = None
@@ -264,8 +416,28 @@ def main() -> None:
             start=h_start, end=data_end,
             warmup_days=wf_cfg.warmup_days,
         )
-        if holdout.n_trades >= 2:
+
+    if spec.select == "equity_sharpe":
+        mc_oos = None
+        mc_holdout = None
+        mc_report = {"oos": None, "holdout": None, "reason": DGT_MC_REASON}
+        start_ms = int(dt_to_unix_nanos(data_start) / 1_000_000)
+        end_ms = int(dt_to_unix_nanos(data_end) / 1_000_000)
+        rates = fetch_funding_rates("BTC-USDT-SWAP", start_ms, end_ms)
+        oos_fills = stitch_fills(oos_results)
+        oos_marks = stitch_equity(oos_results, mc_cfg.initial_capital)
+        stitched_funding = _funding_block(oos_marks, oos_fills, rates, mc_cfg.initial_capital)
+        holdout_funding = (
+            _funding_block(holdout.equity_marks, holdout.fills, rates, mc_cfg.initial_capital)
+            if holdout is not None else None
+        )
+    else:
+        mc_oos = bootstrap_trades(stitched, mc_cfg) if len(stitched) >= 2 else None
+        if holdout is not None and holdout.n_trades >= 2:
             mc_holdout = bootstrap_trades(holdout.trade_pnls, mc_cfg)
+        mc_report = {"oos": mc_oos, "holdout": mc_holdout}
+        stitched_funding = None
+        holdout_funding = None
     holdout_metrics = run_metrics(holdout, mc_cfg.initial_capital) if holdout else None
 
     wf_report = {
@@ -275,7 +447,6 @@ def main() -> None:
         "holdout_start": h_start.isoformat(),
         "windows": wf_windows,
     }
-    mc_report = {"oos": mc_oos, "holdout": mc_holdout}
     summary = {
         "instrument_id": instrument_id,
         "strategy": strategy_name,
@@ -289,6 +460,11 @@ def main() -> None:
         "mc_holdout": mc_holdout,
         "robustness": robustness_summary(wf_windows),
     }
+    if spec.select == "equity_sharpe":
+        summary["mc_skip_reason"] = DGT_MC_REASON
+        summary["stitched_oos_funding"] = stitched_funding
+        summary["holdout_funding"] = holdout_funding
+        summary["assumptions"] = DGT_ASSUMPTIONS
 
     report.write_reports(out_dir, wf_report, mc_report, summary)
     report.print_summary(summary)

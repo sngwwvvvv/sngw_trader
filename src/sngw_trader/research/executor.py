@@ -11,6 +11,7 @@ from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.trading.config import ImportableStrategyConfig, StrategyFactory
 
 from sngw_trader.config.settings import Settings
+from sngw_trader.data.funding import parse_fills
 from sngw_trader.research.config import GridSpec
 from sngw_trader.runners.backtest_okx import build_run_config, default_bar_type
 
@@ -22,6 +23,7 @@ class RunResult:
     n_trades: int
     total_pnl: float
     equity_marks: list[tuple[int, float]] = field(default_factory=list)
+    fills: list[tuple[int, float, float]] = field(default_factory=list)
 
 
 def build_strategy(spec: GridSpec, params: dict[str, object], instrument_id: str, bar_type: str):
@@ -71,6 +73,31 @@ def extract_equity_marks(cache, venue: str, window_start_ns: int) -> list[tuple[
     return marks
 
 
+def extract_analyzer_equity_marks(
+    analyzer, initial_capital: float, window_start_ns: int
+) -> list[tuple[int, float]]:
+    """Compound Nautilus' daily portfolio returns into an evaluation equity curve."""
+    returns = analyzer.portfolio_returns()
+    if returns is None or returns.empty:
+        return []
+    marks = [(window_start_ns, initial_capital)]
+    equity = initial_capital
+    for ts, value in returns.items():
+        ts_ns = int(ts.value)
+        if ts_ns <= window_start_ns:
+            continue
+        equity *= 1.0 + float(value)
+        marks.append((ts_ns, equity))
+    return marks if len(marks) > 1 else []
+
+
+def extract_fills(fills_df, window_start_ns: int) -> list[tuple[int, float, float]]:
+    if fills_df is None or getattr(fills_df, "empty", True):
+        return []
+    fills = parse_fills(fills_df.to_dict("records"))
+    return [f for f in fills if f[0] >= window_start_ns]
+
+
 def run_window(
     catalog_path: str,
     instrument_id: str,
@@ -106,9 +133,11 @@ def run_window(
             engine.cache.positions() + engine.cache.position_snapshots(),
             window_start_ns,
         )
-        marks = extract_equity_marks(
-            engine.cache, instrument_id.rsplit(".", 1)[-1], window_start_ns
+        marks = extract_analyzer_equity_marks(
+            engine.portfolio.analyzer, 10_000.0, window_start_ns
         )
-        return replace(result, equity_marks=marks)
+        fills_df = engine.trader.generate_order_fills_report()
+        fills = extract_fills(fills_df, window_start_ns)
+        return replace(result, equity_marks=marks, fills=fills)
     finally:
         node.dispose()
