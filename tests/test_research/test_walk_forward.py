@@ -31,9 +31,20 @@ def test_stitch_empty():
 
 def test_load_grid_default(monkeypatch):
     monkeypatch.delenv("WF_GRID_PATH", raising=False)
+    monkeypatch.delenv("WF_SIZING_MODE", raising=False)
     spec = load_grid()
     assert spec.strategy_path.endswith("ema_cross:EMACross")
-    assert spec.grid == {"fast_ema_period": [10, 20, 30], "slow_ema_period": [20, 50, 100]}
+    assert spec.grid == {}
+    assert spec.fixed["trade_size"] == "0.10"
+    assert spec.fixed["fast_ema_period"] == 20
+    assert spec.fixed["slow_ema_period"] == 50
+    assert spec.fixed["sizing_mode"] == "vol_target"
+
+
+def test_load_grid_selects_sizing_mode(monkeypatch):
+    monkeypatch.delenv("WF_GRID_PATH", raising=False)
+    monkeypatch.setenv("WF_SIZING_MODE", "fixed")
+    assert load_grid().fixed["sizing_mode"] == "fixed"
 
 
 def test_load_grid_from_json(tmp_path, monkeypatch):
@@ -58,7 +69,8 @@ def test_env_override_configs(monkeypatch):
     wf, mc = build_wf_configs()
     assert isinstance(wf, WalkForwardConfig)
     assert isinstance(mc, MCConfig)
-    assert wf.min_trades == 30
+    assert wf.min_trades == 1
+    assert wf.warmup_days == 61
     assert mc.n_sims == 1000
 
     monkeypatch.setenv("WF_MIN_TRADES", "99")
@@ -103,15 +115,16 @@ def test_robustness_summary_aggregates_and_excludes():
     windows = [
         {"oos_is_sharpe_ratio": 1.0,
          "oos_metrics": {"trade": None,
-                         "equity": {"sortino": 0.2, "calmar": None, "mdd_ratio": 0.1}}},
+                         "equity": {"sharpe": 0.4, "sortino": 0.2, "calmar": None, "mdd_ratio": 0.1}}},
         {"oos_is_sharpe_ratio": None,
          "oos_metrics": {"trade": None,
-                         "equity": {"sortino": None, "calmar": 1.5, "mdd_ratio": 0.3}}},
+                         "equity": {"sharpe": None, "sortino": None, "calmar": 1.5, "mdd_ratio": 0.3}}},
         {"oos_is_sharpe_ratio": None, "oos_metrics": None},
     ]
     r = robustness_summary(windows)
     assert r["oos_is_sharpe_ratios"] == [1.0]
     assert r["n_excluded_ratio_windows"] == 2
+    assert r["oos_sharpe"] == {"mean": pytest.approx(0.4), "n_excluded": 1}
     assert r["oos_sortino"] == {"mean": pytest.approx(0.2), "n_excluded": 1}
     assert r["oos_calmar"] == {"mean": pytest.approx(1.5), "n_excluded": 1}
     assert r["oos_mdd_ratio"] == {"mean": pytest.approx(0.2), "max": pytest.approx(0.3), "n_excluded": 0}

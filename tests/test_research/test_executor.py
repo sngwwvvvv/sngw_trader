@@ -1,10 +1,13 @@
 from types import SimpleNamespace
 
+import pandas as pd
+
 from sngw_trader.research.config import GridSpec
 from sngw_trader.research.executor import (
     RunResult,
     build_strategy,
     extract_equity_marks,
+    extract_analyzer_equity_marks,
     extract_run_result,
 )
 
@@ -98,6 +101,22 @@ def test_extract_equity_marks_no_account_or_events():
     assert extract_equity_marks(_Cache(None), "OKX", 0) == []
     assert extract_equity_marks(_Cache(_Acc([])), "OKX", 0) == []
     assert extract_equity_marks(_Cache(_Acc([_Ev(50, 100.0)])), "OKX", 100) == []
+
+
+def test_extract_analyzer_equity_marks_compounds_daily_returns():
+    class Analyzer:
+        def portfolio_returns(self):
+            return pd.Series(
+                [0.10, -0.05, 0.02],
+                index=pd.to_datetime([200, 300, 400], unit="ns", utc=True),
+            )
+
+    assert extract_analyzer_equity_marks(Analyzer(), 10_000.0, 100) == [
+        (100, 10_000.0),
+        (200, 11_000.0),
+        (300, 10_450.0),
+        (400, 10_659.0),
+    ]
 
 
 def test_run_result_default_equity_marks():

@@ -85,18 +85,21 @@ def compute_equity_metrics(
     )
     calmar = (
         annualized_return / mdd_ratio
-        if mdd_ratio > 0 and annualized_return is not None and annualized_return > 0
+        if mdd_ratio > 0 and annualized_return is not None
         else None
     )
 
     downside = np.minimum(rets, 0.0)
     down_std = float(np.sqrt(np.mean(downside**2)))
     sortino = None if down_std == 0 else float(rets.mean() / down_std)
+    std = float(rets.std(ddof=1)) if len(rets) > 1 else 0.0
+    sharpe = None if std == 0 else float(rets.mean() / std * np.sqrt(365.25))
 
     p95, p5 = float(np.percentile(rets, 95)), float(np.percentile(rets, 5))
     tail_ratio = None if p5 == 0 else abs(p95) / abs(p5)
 
     return {
+        "sharpe": sharpe,
         "sortino": sortino,
         "calmar": calmar,
         "mdd_ratio": mdd_ratio,

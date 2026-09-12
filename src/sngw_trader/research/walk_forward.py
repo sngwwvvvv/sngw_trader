@@ -25,8 +25,13 @@ from sngw_trader.runners.backtest_okx import default_bar_type
 DEFAULT_GRID = GridSpec(
     strategy_path="sngw_trader.strategies.example.ema_cross:EMACross",
     config_path="sngw_trader.strategies.example.ema_cross:EMACrossConfig",
-    fixed={"trade_size": "0.01"},
-    grid={"fast_ema_period": [10, 20, 30], "slow_ema_period": [20, 50, 100]},
+    fixed={
+        "trade_size": "0.10",
+        "fast_ema_period": 20,
+        "slow_ema_period": 50,
+        "sizing_mode": "vol_target",
+    },
+    grid={},
 )
 
 DAY_NS = 86_400_000_000_000
@@ -56,7 +61,15 @@ def bh_metrics(
 def load_grid() -> GridSpec:
     path = os.environ.get("WF_GRID_PATH")
     if not path:
-        return DEFAULT_GRID
+        mode = os.environ.get("WF_SIZING_MODE", DEFAULT_GRID.fixed["sizing_mode"])
+        if mode not in {"fixed", "vol_target"}:
+            raise ValueError(f"WF_SIZING_MODE must be fixed or vol_target, got {mode!r}")
+        return GridSpec(
+            strategy_path=DEFAULT_GRID.strategy_path,
+            config_path=DEFAULT_GRID.config_path,
+            fixed={**DEFAULT_GRID.fixed, "sizing_mode": mode},
+            grid={},
+        )
     data = json.loads(Path(path).read_text())
     return GridSpec(
         strategy_path=data["strategy_path"],
@@ -128,6 +141,7 @@ def robustness_summary(wf_windows: list[dict]) -> dict:
         "oos_is_sharpe_ratios": ratios,
         "n_excluded_ratio_windows":
             sum(1 for w in wf_windows if w.get("oos_is_sharpe_ratio") is None),
+        "oos_sharpe": agg("sharpe", with_max=False),
         "oos_sortino": agg("sortino", with_max=False),
         "oos_calmar": agg("calmar", with_max=False),
         "oos_mdd_ratio": agg("mdd_ratio", with_max=True),
@@ -173,8 +187,8 @@ def build_wf_configs() -> tuple[WalkForwardConfig, MCConfig]:
         is_months=_env_int("WF_IS_MONTHS", 6),
         oos_months=_env_int("WF_OOS_MONTHS", 3),
         holdout_months=_env_int("WF_HOLDOUT_MONTHS", 6),
-        warmup_days=_env_int("WF_WARMUP_DAYS", 1),
-        min_trades=_env_int("WF_MIN_TRADES", 30),
+        warmup_days=_env_int("WF_WARMUP_DAYS", 61),
+        min_trades=_env_int("WF_MIN_TRADES", 1),
     )
     mc_cfg = MCConfig(
         n_sims=_env_int("MC_ITERS", 1000),

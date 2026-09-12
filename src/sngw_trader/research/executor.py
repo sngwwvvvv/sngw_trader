@@ -71,6 +71,24 @@ def extract_equity_marks(cache, venue: str, window_start_ns: int) -> list[tuple[
     return marks
 
 
+def extract_analyzer_equity_marks(
+    analyzer, initial_capital: float, window_start_ns: int
+) -> list[tuple[int, float]]:
+    """Compound Nautilus' daily portfolio returns into an evaluation equity curve."""
+    returns = analyzer.portfolio_returns()
+    if returns is None or returns.empty:
+        return []
+    marks = [(window_start_ns, initial_capital)]
+    equity = initial_capital
+    for ts, value in returns.items():
+        ts_ns = int(ts.value)
+        if ts_ns <= window_start_ns:
+            continue
+        equity *= 1.0 + float(value)
+        marks.append((ts_ns, equity))
+    return marks if len(marks) > 1 else []
+
+
 def run_window(
     catalog_path: str,
     instrument_id: str,
@@ -104,8 +122,8 @@ def run_window(
             engine.cache.positions() + engine.cache.position_snapshots(),
             window_start_ns,
         )
-        marks = extract_equity_marks(
-            engine.cache, instrument_id.rsplit(".", 1)[-1], window_start_ns
+        marks = extract_analyzer_equity_marks(
+            engine.portfolio.analyzer, 10_000.0, window_start_ns
         )
         return replace(result, equity_marks=marks)
     finally:
