@@ -88,3 +88,97 @@ def test_ladders_pair_price_and_qty():
     assert len(buys) == 3
     assert buys[0][0] == Decimal("99")
     assert sum(q * p for p, q in buys) == Decimal("9")
+
+
+from sngw_trader.strategies.dynamic_grid import GridBook
+
+
+def _book(**kw) -> GridBook:
+    return GridBook(h=3, k=Decimal("0.01"), reset_enabled=True, **kw)
+
+
+def test_open_grid_splits_cash_and_sets_levels():
+    b = _book()
+    assert b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01")) is True
+    assert b.grid_qty == Decimal("50")          # (10000/2)/100
+    assert b.working_cash == Decimal("5000")
+    assert b.bag_qty == 0
+    assert b.center == Decimal("100")
+    assert len(b.levels) == 7
+    assert b.lower == b.levels[0]
+    assert b.upper == b.levels[-1]
+    assert b.active is True
+
+
+def test_open_grid_below_min_qty_is_noop():
+    b = _book()
+    assert b.open_grid(Decimal("1"), Decimal("100"), Decimal("0.01")) is False
+    assert b.active is False
+    assert b.grid_qty == 0
+
+
+def test_working_sell_does_not_reduce_bag():
+    b = _book()
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    b.bag_qty = Decimal("10")
+    b.apply_sell(Decimal("5"), Decimal("101"))
+    assert b.bag_qty == Decimal("10")
+    assert b.grid_qty == Decimal("45")
+    assert b.working_cash == Decimal("5000") + Decimal("5") * Decimal("101")
+
+
+def test_sell_clips_to_grid_qty_never_short():
+    b = _book()
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    b.apply_sell(Decimal("999"), Decimal("101"))
+    assert b.grid_qty == 0
+    assert b.bag_qty == 0
+
+
+def test_upper_reset_clears_grid_keeps_bag():
+    b = _book()
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    b.bag_qty = Decimal("7")
+    assert b.should_reset_upper(b.upper + Decimal("0.01"))
+    b.reset_upper()
+    assert b.grid_qty == 0
+    assert b.bag_qty == Decimal("7")
+    assert b.active is False
+    assert b.stopped is False
+    assert b.can_open() is True
+
+
+def test_lower_reset_moves_grid_to_bag():
+    b = _book()
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    grid = b.grid_qty
+    assert b.should_reset_lower(b.lower - Decimal("0.01"))
+    b.reset_lower()
+    assert b.bag_qty == grid
+    assert b.grid_qty == 0
+    assert b.working_cash == 0
+    assert b.active is False
+    assert b.can_open() is True
+
+
+def test_reset_disabled_stops_after_first_bound():
+    b = GridBook(h=3, k=Decimal("0.01"), reset_enabled=False)
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    b.reset_upper()
+    assert b.stopped is True
+    assert b.can_open() is False
+    assert b.open_grid(Decimal("5000"), Decimal("110"), Decimal("0.01")) is False
+    assert b.active is False
+
+
+def test_working_orders_only_remaining_side_of_last_price():
+    b = _book()
+    b.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    sells, buys = b.working_orders(Decimal("100"))
+    assert len(sells) == 3 and len(buys) == 3
+    assert sum(q for _, q in sells) == b.grid_qty
+    assert sum(p * q for p, q in buys) == b.working_cash
+    sells_up, buys_up = b.working_orders(b.levels[b.h + 1])  # last_price = level(+1)
+    assert all(px > b.levels[b.h + 1] for px, _ in sells_up)
+    assert len(sells_up) == 2
+    assert all(px < b.levels[b.h + 1] for px, _ in buys_up)
