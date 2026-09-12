@@ -207,7 +207,7 @@ def test_config_defaults_and_okx_ids():
     assert s._book.k == Decimal("0.01")
     assert s._book.reset_enabled is True
     assert s._in_reset is False
-    assert s._opening is False
+    assert s._opening_id is None
 
 
 def test_strategy_module_has_no_runner_imports():
@@ -216,3 +216,61 @@ def test_strategy_module_has_no_runner_imports():
     text = Path("src/sngw_trader/strategies/dynamic_grid.py").read_text(encoding="utf-8")
     for token in ("BacktestNode", "TradingNode", "OKXDataClientFactory", "ccxt", "python-okx"):
         assert token not in text
+
+
+from nautilus_trader.model.enums import OrderSide
+
+
+class _Num:
+    def __init__(self, d):
+        self._d = d
+
+    def as_decimal(self):
+        return self._d
+
+
+class _Fill:
+    def __init__(self, cid, side):
+        self.client_order_id = cid
+        self.instrument_id = InstrumentId.from_str("BTC-USDT-SWAP.OKX")
+        self.order_side = side
+        self.last_qty = _Num(Decimal("1"))
+        self.last_px = _Num(Decimal("100"))
+
+
+def _strategy() -> DynamicGrid:
+    cfg = DynamicGridConfig(
+        instrument_id=InstrumentId.from_str("BTC-USDT-SWAP.OKX"),
+        bar_type=BarType.from_str("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+        grid_size=0.01,
+        grid_numbers_half=3,
+    )
+    return DynamicGrid(config=cfg)
+
+
+def test_opening_latch_keys_on_client_order_id():
+    s = _strategy()
+    s._book.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    s._opening_id = "O-OPEN"
+    s.cancel_all_orders = lambda *a, **k: None
+    s._place_ladder = lambda: None
+    s.on_order_filled(_Fill("O-OTHER", OrderSide.BUY))
+    assert s._book.grid_qty == Decimal("51")  # non-matching fill -> apply_buy runs
+    assert s._opening_id == "O-OPEN"
+    s.on_order_filled(_Fill("O-OPEN", OrderSide.BUY))
+    assert s._opening_id is None
+    assert s._book.grid_qty == Decimal("51")  # opening fill skips apply_buy
+
+
+def test_place_ladder_cancels_before_replacing():
+    s = _strategy()
+    s._book.open_grid(Decimal("10000"), Decimal("100"), Decimal("0.01"))
+    s._last_price = Decimal("100")
+    calls = []
+    s.cancel_all_orders = lambda *a, **k: calls.append("cancel")
+    s._instrument = lambda: _Inst()
+    s._submit_limit = lambda instrument, side, px, qty, reduce_only: calls.append("submit")
+    s._place_ladder()
+    assert calls[0] == "cancel"
+    assert calls.count("cancel") == 1
+    assert calls.count("submit") == 6  # 3 sells + 3 buys, all after the cancel

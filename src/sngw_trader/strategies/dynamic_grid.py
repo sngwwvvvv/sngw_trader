@@ -174,7 +174,7 @@ class DynamicGrid(Strategy):
             reset_enabled=config.reset_enabled,
         )
         self._in_reset = False
-        self._opening = False
+        self._opening_id: str | None = None
         self._last_price: Decimal | None = None
 
     def on_start(self) -> None:
@@ -208,8 +208,8 @@ class DynamicGrid(Strategy):
             return
         qty = event.last_qty.as_decimal()
         px = event.last_px.as_decimal()
-        if self._opening:
-            self._opening = False
+        if self._opening_id is not None and event.client_order_id == self._opening_id:
+            self._opening_id = None
             if self._book.active and not self._book.stopped:
                 self._place_ladder()
             return
@@ -253,15 +253,15 @@ class DynamicGrid(Strategy):
             return
         if not self._book.open_grid(m, price, min_qty):
             return
-        self._opening = True
-        self.submit_order(
-            self.order_factory.market(self.config.instrument_id, OrderSide.BUY, q)
-        )
+        order = self.order_factory.market(self.config.instrument_id, OrderSide.BUY, q)
+        self._opening_id = order.client_order_id
+        self.submit_order(order)
 
     def _place_ladder(self) -> None:
         instrument = self._instrument()
         if instrument is None or self._last_price is None or not self._book.active:
             return
+        self.cancel_all_orders(self.config.instrument_id)
         sells, buys = self._book.working_orders(self._last_price)
         for px, qty in sells:
             self._submit_limit(instrument, OrderSide.SELL, px, qty, reduce_only=True)
