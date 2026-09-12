@@ -45,3 +45,46 @@ def test_quantize_skips_zero_and_sub_increment():
     assert quantize_price(inst, Decimal("123.49")) == Decimal("123.4")
     assert quantize_qty(inst, Decimal("0.019")) == Decimal("0.01")
     assert quantize_qty(inst, Decimal("0.003")) is None
+
+
+from sngw_trader.strategies.dynamic_grid import (
+    buy_increments,
+    buy_ladder,
+    sell_increments,
+    sell_ladder,
+)
+
+
+def test_sell_increments_consume_remaining_exactly():
+    remaining = Decimal("6")
+    qtys = sell_increments(remaining, 3)
+    assert qtys == [Decimal("2"), Decimal("2"), Decimal("2")]
+    assert sum(qtys) == remaining
+
+
+def test_sell_increments_n1_is_all():
+    assert sell_increments(Decimal("1.5"), 1) == [Decimal("1.5")]
+
+
+def test_buy_increments_consume_cash_exactly():
+    cash = Decimal("99")
+    prices = [Decimal("99"), Decimal("98"), Decimal("97")]
+    qtys = buy_increments(cash, prices)
+    spent = sum(q * p for q, p in zip(qtys, prices))
+    assert spent == cash
+    assert qtys[0] == (cash / 3) / prices[0]
+    assert qtys[1] == (cash / 3) / prices[1]
+    assert qtys[2] == (cash / 3) / prices[2]
+
+
+def test_ladders_pair_price_and_qty():
+    sells = sell_ladder(Decimal("6"), [Decimal("101"), Decimal("102"), Decimal("103")])
+    assert sells == [
+        (Decimal("101"), Decimal("2")),
+        (Decimal("102"), Decimal("2")),
+        (Decimal("103"), Decimal("2")),
+    ]
+    buys = buy_ladder(Decimal("9"), [Decimal("99"), Decimal("98"), Decimal("97")])
+    assert len(buys) == 3
+    assert buys[0][0] == Decimal("99")
+    assert sum(q * p for p, q in buys) == Decimal("9")
