@@ -71,11 +71,15 @@ def load_grid() -> GridSpec:
             grid={},
         )
     data = json.loads(Path(path).read_text())
+    select = data.get("select")
+    if select is not None and select != "equity_sharpe":
+        raise ValueError(f"GridSpec.select must be absent or 'equity_sharpe', got {select!r}")
     return GridSpec(
         strategy_path=data["strategy_path"],
         config_path=data["config_path"],
         fixed=data.get("fixed", {}),
         grid=data["grid"],
+        select=select,
     )
 
 
@@ -152,13 +156,37 @@ def _params_for(spec: GridSpec, key: tuple) -> dict[str, object]:
     return dict(zip(sorted(spec.grid), key))
 
 
-def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) -> tuple[dict, dict]:
+def _selection_inputs(
+    spec: GridSpec,
+    results: dict[tuple, RunResult],
+    initial_capital: float,
+    min_trades: int,
+) -> tuple[dict[tuple, float], dict[tuple, int], int]:
+    sharpes: dict[tuple, float] = {}
+    gates: dict[tuple, int] = {}
+    if spec.select == "equity_sharpe":
+        for key, res in results.items():
+            metrics = compute_equity_metrics(res.equity_marks, initial_capital)
+            if metrics is None or metrics["sharpe"] is None:
+                sharpes[key] = 0.0
+                gates[key] = 0
+            else:
+                sharpes[key] = metrics["sharpe"]
+                gates[key] = len(res.equity_marks)
+        return sharpes, gates, 2
+    for key, res in results.items():
+        sharpes[key] = sharpe_from_trades(res.trade_returns)
+        gates[key] = res.n_trades
+    return sharpes, gates, min_trades
+
+
+def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) -> dict[tuple, RunResult]:
     catalog_path = str(settings.catalog_path)
     instrument_id = settings.instrument_id_str
     axes = sorted(spec.grid)
     results: dict[tuple, RunResult] = {}
-    sharpes: dict[tuple, float] = {}
-    for i, key in enumerate(param_keys(spec.grid), 1):
+    keys = param_keys(spec.grid)
+    for i, key in enumerate(keys, 1):
         res = run_window(
             catalog_path, instrument_id, settings=settings, spec=spec,
             params=dict(zip(axes, key)),
@@ -166,10 +194,8 @@ def _run_is_grid(settings, spec: GridSpec, window, wf_cfg: WalkForwardConfig) ->
             warmup_days=wf_cfg.warmup_days,
         )
         results[key] = res
-        sharpes[key] = sharpe_from_trades(res.trade_returns)
-        print(f"[wf] window {window.index} IS {i}/{len(param_keys(spec.grid))} "
-              f"{dict(zip(axes, key))} sharpe={sharpes[key]:.2f} trades={res.n_trades}")
-    return results, sharpes
+        print(f"[wf] window {window.index} IS {i}/{len(keys)} {dict(zip(axes, key))} trades={res.n_trades}")
+    return results
 
 
 def _env_int(name: str, default: int) -> int:
@@ -224,12 +250,11 @@ def main() -> None:
     last_params: tuple | None = None
 
     for window in windows:
-        grid_results, sharpes = _run_is_grid(settings, spec, window, wf_cfg)
-        best = select_best(
-            spec.grid, sharpes,
-            {k: r.n_trades for k, r in grid_results.items()},
-            wf_cfg.min_trades,
+        grid_results = _run_is_grid(settings, spec, window, wf_cfg)
+        sharpes, gates, min_gate = _selection_inputs(
+            spec, grid_results, mc_cfg.initial_capital, wf_cfg.min_trades,
         )
+        best = select_best(spec.grid, sharpes, gates, min_gate)
         oos_result: RunResult | None = None
         if best is not None:
             last_params = best
@@ -242,8 +267,14 @@ def main() -> None:
         oos_results.append(oos_result)
         oos_metrics = run_metrics(oos_result, mc_cfg.initial_capital) if oos_result else None
         is_metrics = run_metrics(grid_results[best], mc_cfg.initial_capital) if best is not None else None
-        ratio = (oos_is_sharpe_ratio(sharpes[best], oos_result)
-                 if best is not None and oos_result is not None else None)
+        if best is not None and oos_result is not None:
+            if spec.select == "equity_sharpe":
+                oos_s = None if oos_metrics is None or oos_metrics["equity"] is None else oos_metrics["equity"]["sharpe"]
+                ratio = None if sharpes[best] <= 0 or oos_s is None else oos_s / sharpes[best]
+            else:
+                ratio = oos_is_sharpe_ratio(sharpes[best], oos_result)
+        else:
+            ratio = None
         wf_windows.append({
             "index": window.index,
             "is": {"start": window.is_start.isoformat(), "end": window.is_end.isoformat()},

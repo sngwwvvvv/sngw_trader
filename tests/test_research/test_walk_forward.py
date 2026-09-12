@@ -61,6 +61,7 @@ def test_load_grid_from_json(tmp_path, monkeypatch):
     spec = load_grid()
     assert spec.fixed == {"trade_size": "0.02"}
     assert spec.grid == {"fast_ema_period": [5, 10]}
+    assert spec.select is None
 
 
 def test_env_override_configs(monkeypatch):
@@ -256,3 +257,85 @@ def test_main_no_eligible_combo_yields_null_metrics(monkeypatch, tmp_path):
     assert summary["holdout"] is None
     assert summary["robustness"]["oos_is_sharpe_ratios"] == []
     assert summary["robustness"]["n_excluded_ratio_windows"] == len(wf_report["windows"])
+
+
+def test_load_grid_reads_select(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01], "reset_enabled": [True]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    spec = load_grid()
+    assert spec.select == "equity_sharpe"
+    assert spec.grid["grid_size"] == [0.01]
+
+
+def test_load_grid_json_without_select_is_none(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.example.ema_cross:EMACross",
+        "config_path": "sngw_trader.strategies.example.ema_cross:EMACrossConfig",
+        "fixed": {"trade_size": "0.02"},
+        "grid": {"fast_ema_period": [5, 10]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    assert load_grid().select is None
+
+
+def test_load_grid_rejects_unknown_select(tmp_path, monkeypatch):
+    p = tmp_path / "grid.json"
+    p.write_text(json.dumps({
+        "strategy_path": "x:Y",
+        "config_path": "x:C",
+        "select": "trade_sharpe",
+        "fixed": {},
+        "grid": {"a": [1]},
+    }))
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+    with pytest.raises(ValueError, match="equity_sharpe"):
+        load_grid()
+
+
+def test_main_selects_equity_sharpe_not_trade(monkeypatch, tmp_path):
+    import sngw_trader.research.walk_forward as wf
+
+    p = tmp_path / "dgt.json"
+    p.write_text(json.dumps({
+        "strategy_path": "sngw_trader.strategies.dynamic_grid:DynamicGrid",
+        "config_path": "sngw_trader.strategies.dynamic_grid:DynamicGridConfig",
+        "select": "equity_sharpe",
+        "fixed": {},
+        "grid": {"grid_size": [0.01, 0.02]},
+    }))
+    _wf_env(monkeypatch)
+    monkeypatch.setenv("WF_GRID_PATH", str(p))
+
+    def fake_run(*a, **k):
+        params = k.get("params") or (a[4] if len(a) > 4 else {})
+        if params.get("grid_size") == 0.01:
+            return RunResult(
+                [100.0, 100.0], [0.5, 0.5], 2, 200.0,
+                equity_marks=[(0, 10000.0), (NS_PER_YEAR, 0.0)],
+            )
+        return RunResult(
+            [1.0, -2.0], [0.01, -0.02], 2, -1.0,
+            equity_marks=[
+                (0, 10000.0),
+                (NS_PER_YEAR // 2, 11000.0),
+                (NS_PER_YEAR, 12000.0),
+            ],
+        )
+
+    monkeypatch.setattr(wf, "run_window", fake_run)
+    monkeypatch.setattr(wf, "bootstrap_trades", lambda trades, mc_cfg: {"sims": mc_cfg.n_sims})
+    monkeypatch.setattr(report, "run_dir", lambda name: tmp_path)
+    monkeypatch.setattr(report, "print_summary", lambda summary: None)
+    wf.main()
+    wf_report = json.loads((tmp_path / "wf_report.json").read_text(encoding="utf-8"))
+    assert wf_report["windows"]
+    for w in wf_report["windows"]:
+        assert w["selected"] == {"grid_size": 0.02}
