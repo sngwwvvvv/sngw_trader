@@ -238,3 +238,19 @@ def test_entry_does_not_inflate_signed_qty_before_fill():
     s._signed_qty = Decimal("0.01")
     exit_intents = s._on_last_minute(last_minute_ts(5))
     assert exit_intents[0].qty == Decimal("0.01")
+
+
+def test_exit_intent_does_not_zero_signed_qty_before_fill():
+    s = ThreeRedDays(config=_config())
+    _complete(s, 0, _red())
+    _complete(s, 1, _red())
+    assert _complete(s, 2, _red())[0].side == 1
+    s._signed_qty = Decimal("0.01")  # simulate on_event buy-fill reconciliation
+    exit_intents = s._on_last_minute(last_minute_ts(5))
+    assert len(exit_intents) == 1
+    assert exit_intents[0].qty == Decimal("0.01")
+    assert s._in_position is False
+    # intent must NOT zero _signed_qty; the sell fill reconciles it
+    assert s._signed_qty == Decimal("0.01")
+    s._signed_qty += Decimal("-0.01")  # simulate on_event sell-fill reconciliation
+    assert s._signed_qty == Decimal("0")

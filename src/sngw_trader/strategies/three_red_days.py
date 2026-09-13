@@ -107,7 +107,6 @@ class ThreeRedDays(Strategy):
     def _clear_position(self) -> None:
         self._in_position = False
         self._entry_bucket = None
-        self._signed_qty = Decimal("0")
 
     def _on_last_minute(self, ts_close_ns: int) -> list[OrderIntent]:
         if not self._in_position or self._entry_bucket is None:
