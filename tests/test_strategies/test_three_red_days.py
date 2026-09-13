@@ -225,3 +225,16 @@ def test_on_1m_routes_last_minute_then_completed_day():
     assert s._on_1m(last_minute_ts(4), 1, 1, 1, 1) == []
     exit_intents = s._on_1m(last_minute_ts(5), 1, 1, 1, 1)
     assert len(exit_intents) == 1 and exit_intents[0].side == -1
+
+
+def test_entry_does_not_inflate_signed_qty_before_fill():
+    s = ThreeRedDays(config=_config())
+    _complete(s, 0, _red())
+    _complete(s, 1, _red())
+    assert _complete(s, 2, _red())[0].side == 1
+    # _signed_qty reconciles from fills (on_event) only, never optimistically
+    assert s._signed_qty == Decimal("0")
+    # simulate the fill reconciliation on_event performs
+    s._signed_qty = Decimal("0.01")
+    exit_intents = s._on_last_minute(last_minute_ts(5))
+    assert exit_intents[0].qty == Decimal("0.01")

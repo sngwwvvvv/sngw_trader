@@ -143,7 +143,6 @@ class ThreeRedDays(Strategy):
             qty = self.config.trade_size
             self._in_position = True
             self._entry_bucket = utc_bucket(now_ts_close_ns)
-            self._signed_qty = qty
             intents.append(OrderIntent(1, qty))
         return intents
 
