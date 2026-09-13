@@ -87,17 +87,26 @@ def _dt_to_ns(dt_str: str) -> int:
     return int(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").timestamp()) * 1_000_000_000
 
 
+def _ts_to_ns(ts) -> int:
+    """ns epoch from int/float, digit str, or datetime-like (e.g. pd.Timestamp)."""
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if isinstance(ts, str):
+        return int(ts) if ts.isdigit() else _dt_to_ns(ts)
+    return int(ts.timestamp()) * 1_000_000_000
+
+
 def parse_fills(rows: list[dict]) -> list[tuple[int, float, float]]:
     """Map fills CSV rows to (ts_ns, signed_qty, px). Defensive on column names."""
     if not rows:
         return []
     cols = set(rows[0].keys())
     if "filled_ts" in cols:
-        ts_col, ts_is_ns = "filled_ts", True
+        ts_col = "filled_ts"
     elif "ts_last" in cols:
-        ts_col, ts_is_ns = "ts_last", False
+        ts_col = "ts_last"
     else:
-        ts_col, ts_is_ns = ("ts_event", True) if "ts_event" in cols else (None, True)
+        ts_col = "ts_event" if "ts_event" in cols else None
     side_col = "order_side" if "order_side" in cols else ("side" if "side" in cols else None)
     qty_col = "last_qty" if "last_qty" in cols else ("filled_qty" if "filled_qty" in cols else None)
     px_col = "last_px" if "last_px" in cols else ("avg_px" if "avg_px" in cols else None)
@@ -109,7 +118,7 @@ def parse_fills(rows: list[dict]) -> list[tuple[int, float, float]]:
         ts = r[ts_col]
         if not ts:
             continue
-        ts_ns = int(ts) if ts_is_ns else _dt_to_ns(ts)
+        ts_ns = _ts_to_ns(ts)
         sign = -1.0 if r[side_col].strip().upper() == "SELL" else 1.0
         fills.append((ts_ns, sign * float(r[qty_col]), float(r[px_col])))
     return fills

@@ -1,8 +1,9 @@
 """Unit tests for funding post-processing. No network."""
 
 import pytest
+import pandas as pd
 
-from sngw_trader.data.funding import apply_funding_to_marks, daily_returns, funding_cost, summarize
+from sngw_trader.data.funding import apply_funding_to_marks, daily_returns, funding_cost, parse_fills, summarize
 
 
 def test_funding_cost_long_pays_positive_rate():
@@ -39,3 +40,26 @@ def test_apply_funding_to_marks_subtracts_cost_at_each_ts():
     assert adjusted[0][1] == pytest.approx(10000.0 - 0.01)
     # second mark still includes the t=0 payment
     assert adjusted[1][1] == pytest.approx(10000.0 - 0.01)
+
+
+def test_parse_fills_accepts_report_dataframe_records():
+    """generate_order_fills_report() records carry pd.Timestamp, not str/int."""
+    rows = [
+        {
+            "ts_event": pd.Timestamp("2020-03-23 11:00:00+00:00"),
+            "ts_last": pd.Timestamp("2020-03-23 11:01:00+00:00"),
+            "order_side": "BUY",
+            "last_qty": 0.5,
+            "last_px": 100.0,
+        },
+        {
+            "ts_event": pd.Timestamp("2020-03-23 11:02:00+00:00"),
+            "ts_last": pd.Timestamp("2020-03-23 11:03:00+00:00"),
+            "order_side": "SELL",
+            "last_qty": 0.2,
+            "last_px": 101.0,
+        },
+    ]
+    fills = parse_fills(rows)
+    assert fills[0] == (int(pd.Timestamp("2020-03-23 11:01:00+00:00").value), 0.5, 100.0)
+    assert fills[1] == (int(pd.Timestamp("2020-03-23 11:03:00+00:00").value), -0.2, 101.0)
