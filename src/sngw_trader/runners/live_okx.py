@@ -25,6 +25,14 @@ def assert_safe_mode(settings: Settings) -> None:
     )
 
 
+def assert_okx_instrument(settings: Settings) -> None:
+    if not settings.instrument_id_str.endswith(".OKX"):
+        raise SystemExit(
+            "live_okx only accepts *.OKX instrument ids, "
+            f"got {settings.instrument_id_str}"
+        )
+
+
 def build_node(settings: Settings) -> TradingNode:
     okx = load_okx_symbols()
     environment = okx["Environment"].DEMO if settings.is_demo else okx["Environment"].LIVE
@@ -96,6 +104,7 @@ def attach_strategy(node: TradingNode, settings: Settings) -> None:
 def main() -> None:
     settings = load_settings()
     assert_safe_mode(settings)
+    assert_okx_instrument(settings)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
 
     print(

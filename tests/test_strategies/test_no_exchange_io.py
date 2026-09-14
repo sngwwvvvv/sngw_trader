@@ -8,6 +8,7 @@ FORBIDDEN = (
     "requests.get",
     "httpx.",
     "websocket",
+    "yfinance",
 )
 
 

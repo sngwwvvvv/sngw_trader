@@ -1,7 +1,7 @@
 import pytest
 
 from sngw_trader.config.settings import Settings
-from sngw_trader.runners.live_okx import assert_safe_mode
+from sngw_trader.runners.live_okx import assert_okx_instrument, assert_safe_mode
 
 
 def _settings(**kwargs) -> Settings:
@@ -61,3 +61,12 @@ def test_live_without_confirm_is_blocked() -> None:
 
 def test_live_with_confirm_is_allowed() -> None:
     assert_safe_mode(_settings(okx_env="live", confirm_live="YES"))
+
+
+def test_live_rejects_etf_instrument_id() -> None:
+    with pytest.raises(SystemExit):
+        assert_okx_instrument(_settings(instrument_id="SPY.ARCA"))
+
+
+def test_live_accepts_okx_instrument_id() -> None:
+    assert_okx_instrument(_settings())
