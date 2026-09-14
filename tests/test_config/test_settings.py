@@ -161,3 +161,49 @@ def test_download_bars_rejects_inverted_range(monkeypatch) -> None:
     s = load_settings()
     with pytest.raises(SystemExit):
         _validate_range(s)
+
+
+def test_instrument_id_env_overrides_okx_append(monkeypatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("INSTRUMENT_ID", "SPY.ARCA")
+    s = load_settings()
+    assert s.instrument_id_str == "SPY.ARCA"
+
+
+def test_instrument_id_env_without_venue_exits(monkeypatch) -> None:
+    import pytest
+
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("INSTRUMENT_ID", "SPY")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_catalog_source_default_okx(monkeypatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = load_settings()
+    assert s.catalog_source == "okx"
+    assert s.etf_symbols == "SPY,QQQ,IWM"
+
+
+def test_catalog_source_yahoo_etf_allowed(monkeypatch) -> None:
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CATALOG_SOURCE", "yahoo-etf")
+    monkeypatch.setenv("ETF_SYMBOLS", " spy, qqq ")
+    s = load_settings()
+    assert s.catalog_source == "yahoo-etf"
+    assert s.etf_symbols == "spy, qqq"
+
+
+def test_catalog_source_typo_exits(monkeypatch) -> None:
+    import pytest
+
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CATALOG_SOURCE", "yahoo")
+    with pytest.raises(SystemExit):
+        load_settings()

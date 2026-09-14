@@ -66,6 +66,9 @@ class Settings:
     size_rebalance_band: float
     catalog_start: datetime | None
     catalog_end: datetime | None
+    catalog_source: str = "okx"
+    etf_symbols: str = "SPY,QQQ,IWM"
+    instrument_id: str = ""
 
     @property
     def is_demo(self) -> bool:
@@ -77,6 +80,13 @@ class Settings:
 
     @property
     def instrument_id_str(self) -> str:
+        override = self.instrument_id.strip()
+        if override:
+            if "." not in override:
+                raise SystemExit(
+                    "INSTRUMENT_ID must include venue after '.', e.g. SPY.ARCA"
+                )
+            return override
         symbol = self.symbol.upper()
         if symbol.endswith(".OKX"):
             return symbol
@@ -90,8 +100,25 @@ def _sizing_mode() -> str:
     return mode
 
 
+_ALLOWED_CATALOG_SOURCES = frozenset({"okx", "yahoo-etf"})
+
+
+def _catalog_source() -> str:
+    raw = _env("CATALOG_SOURCE", "okx")
+    if raw not in _ALLOWED_CATALOG_SOURCES:
+        raise SystemExit(
+            f"CATALOG_SOURCE must be 'okx' or 'yahoo-etf', got {raw!r}"
+        )
+    return raw
+
+
 def load_settings() -> Settings:
     load_dotenv()
+    instrument_id = _env("INSTRUMENT_ID")
+    if instrument_id and "." not in instrument_id:
+        raise SystemExit(
+            "INSTRUMENT_ID must include venue after '.', e.g. SPY.ARCA"
+        )
     return Settings(
         okx_env=_env("OKX_ENV", "demo"),
         confirm_live=_env("CONFIRM_LIVE", "NO"),
@@ -133,4 +160,7 @@ strategy=_env("STRATEGY", "err_mom_a"),
         size_rebalance_band=float(_env("SIZE_REBALANCE_BAND", "0.10")),
         catalog_start=_optional_ts("CATALOG_START"),
         catalog_end=_optional_ts("CATALOG_END"),
+        catalog_source=_catalog_source(),
+        etf_symbols=_env("ETF_SYMBOLS", "SPY,QQQ,IWM"),
+        instrument_id=instrument_id,
     )
