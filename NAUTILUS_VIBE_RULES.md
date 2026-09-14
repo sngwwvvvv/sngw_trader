@@ -11,14 +11,15 @@
 ## 0. 한 줄 결정
 
 ```
-Strategy (순수 로직)
-    └── BacktestNode | TradingNode   ← 유일한 러너
-            └── OKX adapter        ← 유일한 거래소 I/O
+Strategy
+    └── BacktestNode | TradingNode
+            ├── OKX adapter          ← 유일한 라이브 I/O (당분간)
+            └── ParquetDataCatalog   ← OKX 1분 + US ETF 일봉
 ```
 
 - 백테스트 러너 = `BacktestNode` + `ParquetDataCatalog`
 - 라이브/데모/샌드박스 러너 = `TradingNode`
-- 거래소 = OKX only
+- 라이브 거래소 = OKX only. catalog venue = OKX / ARCA / NASDAQ
 - 전략 코드는 백테스트와 라이브에서 **동일 클래스**를 쓴다
 
 라이브 러너는 `TradingNode` + `TradingNodeConfig`로 조립한다.  
@@ -42,6 +43,9 @@ AI는 아래를 생성하거나 제안하지 않는다.
 10. 같은 OKX 계좌를 두 노드가 동시에 거래
 11. 새 프레임워크(backtrader, freqtrade, vectorbt live 등)로 러너를 대체
 12. “일단 간단한 봇으로 돌리고 나중에 Nautilus에 붙이자”는 임시 구현
+13. 토스증권·키움·IB·CME로 주문하는 코드
+14. Yahoo/yfinance를 전략·라이브 러너에서 import
+15. ETF 1분/1시간 수집을 Yahoo rolling으로 우회하는 코드
 
 막히면 **공식 어댑터/노드 API를 찾고**, 없으면 사용자에게 질문한다.  
 추측으로 거래소 클라이언트를 만들지 않는다.
@@ -53,12 +57,13 @@ AI는 아래를 생성하거나 제안하지 않는다.
 | 항목 | 값 |
 |---|---|
 | Engine | NautilusTrader (Python 3.12–3.14) |
-| Venue | `OKX` |
-| InstrumentId | `{OKX_SYMBOL}.OKX` 예: `BTC-USDT-SWAP.OKX`, `BTC-USDT.OKX` |
-| Backtest | `BacktestNode` + `ParquetDataCatalog` |
-| Live | `TradingNode` + `OKXLiveDataClientFactory` + `OKXLiveExecClientFactory` |
+| Live venue | `OKX` only |
+| Catalog venues | `OKX` (crypto 1분), `ARCA` / `NASDAQ` (US ETF 일봉) |
+| InstrumentId | `{SYMBOL}.{VENUE}` 예: `BTC-USDT-SWAP.OKX`, `SPY.ARCA` |
+| Backtest | `BacktestNode` + `ParquetDataCatalog`. venue 이름은 InstrumentId에서 읽음 |
+| Live | `TradingNode` + OKX data/exec factory. 기본 DEMO |
 | Paper 경로 | 1) `OKXEnvironment.DEMO` 2) 필요 시 sandbox exec |
-| Secrets | env only: `OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE` |
+| Secrets | env. OKX 키 + 선택 `yfinance` extra. 토스 키 없음 |
 | State | 라이브는 Redis cache 권장 (`load_state` / `save_state`) |
 | Process | 프로세스당 노드 1개. 노드 안에 전략 N개 |
 
@@ -307,16 +312,16 @@ Nautilus 기본 ID 체계가 하이픈을 넣으면 반드시 끈다.
 
 ## 7. 데이터 / 카탈로그
 
-- 라이브 시세는 OKX data client만 사용한다.
-- 백테스트 시세는 catalog의 `QuoteTick` / `TradeTick` / `Bar`를 사용한다.
-- catalog writer는 `runners/`가 아니라 `scripts/` 또는 `src/sngw_trader/data/`에 둔다.
-- 다운로드 소스(OKX history, Tardis 등)는 writer에만 존재한다.
-- 전략은 데이터 출처를 모른다. `BarType`만 안다.
+- 라이브 시세는 OKX data client만.
+- 백테스트 시세는 catalog의 `Bar` (OKX 1분 또는 ETF 일봉).
+- writer만 Yahoo/OKX HTTP를 연다.
+- 전략은 출처를 모른다. `BarType`만 안다.
 
-BarType 문자열 예:
+BarType 예:
 
 ```
 BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL
+SPY.ARCA-1-DAY-LAST-EXTERNAL
 ```
 
 임의로 `1m`, `BTCUSDT` 같은 약칭을 BarType에 넣지 않는다.
@@ -427,14 +432,15 @@ AI는 한 턴에 시스템을 전부 만들지 않는다. 아래 순서를 지�
 ```
 이 저장소는 NautilusTrader가 전략 러너다.
 자체 트레이딩 루프, ccxt, python-okx 직접 주문은 금지.
-거래소는 OKX만. InstrumentId는 *.OKX.
+라이브 거래소는 OKX만. catalog는 OKX 1분과 US ETF 일봉(ARCA/NASDAQ)을 받는다.
+InstrumentId는 {SYMBOL}.{VENUE} (예: BTC-USDT-SWAP.OKX, SPY.ARCA).
 전략은 nautilus_trader.trading.Strategy 한 클래스.
-백테스트는 BacktestNode + ParquetDataCatalog.
+백테스트는 BacktestNode + ParquetDataCatalog. venue 이름은 InstrumentId에서 읽는다.
 라이브는 TradingNode + OKX data/exec factory.
-시크릿은 OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE.
-기본 실행 모드는 OKX DEMO.
+시크릿은 env. 기본 실행 모드는 OKX DEMO.
 전략 파일은 노드/어댑터를 조립하지 않고,
 러너 파일은 매매 조건을 갖지 않는다.
+Yahoo/yfinance는 catalog writer뿐이다.
 자세한 규칙은 NAUTILUS_VIBE_RULES.md 를 따른다.
 ```
 

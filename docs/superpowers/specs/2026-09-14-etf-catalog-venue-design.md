@@ -1,7 +1,7 @@
 # US ETF 일봉 카탈로그 + 백테스트 venue 추론
 
 - 날짜: 2026-09-14
-- 상태: 초안 (설계 협의 완료, spec 승인 대기)
+- 상태: 승인됨
 - 적용 규칙: `NAUTILUS_VIBE_RULES.md` (다운로드는 writer에만, 전략은 BarType만 인지)
 
 ## 1. 목적

@@ -6,7 +6,7 @@
 한 줄 요약:
 
 - 러너는 만들지 않는다. `BacktestNode` / `TradingNode`가 러너다.
-- 거래소는 OKX만. `InstrumentId`는 `*.OKX`.
+- 라이브 거래소는 OKX만. catalog venue는 OKX / ARCA / NASDAQ. InstrumentId는 {SYMBOL}.{VENUE}.
 - 전략은 `nautilus_trader.trading.Strategy` 한 클래스.
 - 백테스트는 BacktestNode + ParquetDataCatalog.
 - 라이브는 TradingNode + OKX data/exec factory.

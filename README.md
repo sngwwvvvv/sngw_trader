@@ -1,6 +1,6 @@
 # sngw_trader
 
-NautilusTrader가 러너이고, OKX가 유일한 거래소인 전략 패키지 뼈대다.
+NautilusTrader가 러너이고, OKX가 유일한 라이브 거래소이고, catalog는 US ETF 일봉을 받을 수 있다.
 
 바이브 코딩 전에 읽을 것:
 
