@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -26,8 +27,18 @@ from sngw_trader.config.settings import Settings
 from sngw_trader.runners.strategy_factory import build_strategy
 
 
+def venue_name(instrument_id: str) -> str:
+    if "." not in instrument_id:
+        raise SystemExit(
+            f"instrument id must include venue after '.', got {instrument_id!r}"
+        )
+    return instrument_id.rsplit(".", 1)[-1]
+
+
 def default_bar_type(instrument_id: str) -> str:
-    return f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+    if venue_name(instrument_id) == "OKX":
+        return f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+    return f"{instrument_id}-1-DAY-LAST-EXTERNAL"
 
 
 def build_fill_model_config(settings: Settings) -> ImportableFillModelConfig:
@@ -42,13 +53,32 @@ def build_fill_model_config(settings: Settings) -> ImportableFillModelConfig:
     )
 
 
-def build_fee_model_config(settings: Settings) -> ImportableFeeModelConfig:
+def _fee_rates(instrument_id: str, settings: Settings) -> tuple[float, float]:
+    if venue_name(instrument_id) == "OKX":
+        return settings.bt_maker_fee, settings.bt_taker_fee
+    maker = (
+        float(os.environ["BT_MAKER_FEE"])
+        if "BT_MAKER_FEE" in os.environ
+        else 0.0001
+    )
+    taker = (
+        float(os.environ["BT_TAKER_FEE"])
+        if "BT_TAKER_FEE" in os.environ
+        else 0.0001
+    )
+    return maker, taker
+
+
+def build_fee_model_config(
+    settings: Settings, instrument_id: str
+) -> ImportableFeeModelConfig:
+    maker, taker = _fee_rates(instrument_id, settings)
     return ImportableFeeModelConfig(
         fee_model_path="sngw_trader.runners.backtest_models:OkxRateFeeModel",
         config_path="sngw_trader.runners.backtest_models:OkxRateFeeModelConfig",
         config={
-            "maker_fee_rate": settings.bt_maker_fee,
-            "taker_fee_rate": settings.bt_taker_fee,
+            "maker_fee_rate": maker,
+            "taker_fee_rate": taker,
         },
     )
 
@@ -77,14 +107,16 @@ def build_run_config(
     raise_exception: bool = False,
     quiet: bool = False,
 ) -> BacktestRunConfig:
+    venue_id = venue_name(instrument_id)
+    quote = "USDT" if venue_id == "OKX" else "USD"
     venue = BacktestVenueConfig(
-        name="OKX",
+        name=venue_id,
         oms_type=OmsType.NETTING,
         account_type=AccountType.MARGIN,
         book_type="L1_MBP",
-        starting_balances=["10_000 USDT"],
+        starting_balances=[f"10_000 {quote}"],
         fill_model=build_fill_model_config(settings),
-        fee_model=build_fee_model_config(settings),
+        fee_model=build_fee_model_config(settings, instrument_id),
         latency_model=build_latency_model_config(settings),
     )
     data = BacktestDataConfig(

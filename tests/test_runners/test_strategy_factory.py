@@ -15,3 +15,13 @@ def test_build_dispatch_b(monkeypatch):
 
 def test_source_bar_type_is_1_minute_external():
     assert source_bar_type("BTC-USDT-SWAP.OKX") == "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"
+
+
+def test_source_bar_type_matches_default_bar_type() -> None:
+    from sngw_trader.runners.backtest_okx import default_bar_type
+
+    assert source_bar_type("BTC-USDT-SWAP.OKX") == default_bar_type(
+        "BTC-USDT-SWAP.OKX"
+    )
+    assert source_bar_type("SPY.ARCA") == default_bar_type("SPY.ARCA")
+    assert source_bar_type("SPY.ARCA") == "SPY.ARCA-1-DAY-LAST-EXTERNAL"

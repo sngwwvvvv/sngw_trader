@@ -1,8 +1,15 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from sngw_trader.config.settings import Settings
-from sngw_trader.runners.backtest_okx import attach_strategy, build_run_config
+from sngw_trader.runners.backtest_okx import (
+    attach_strategy,
+    build_run_config,
+    default_bar_type,
+    venue_name,
+)
 
 
 def _settings() -> Settings:
@@ -65,3 +72,46 @@ def test_attach_strategy_no_compatible_method_raises():
         raise AssertionError("expected RuntimeError")
     except RuntimeError:
         pass
+
+
+def test_venue_name() -> None:
+    assert venue_name("SPY.ARCA") == "ARCA"
+    assert venue_name("BTC-USDT-SWAP.OKX") == "OKX"
+
+
+def test_venue_name_without_dot_exits() -> None:
+    with pytest.raises(SystemExit):
+        venue_name("SPY")
+
+
+def test_default_bar_type_okx_minute_etf_day() -> None:
+    assert default_bar_type("BTC-USDT-SWAP.OKX") == (
+        "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"
+    )
+    assert default_bar_type("SPY.ARCA") == "SPY.ARCA-1-DAY-LAST-EXTERNAL"
+
+
+def test_build_run_config_etf_venue_usd(monkeypatch) -> None:
+    monkeypatch.delenv("BT_MAKER_FEE", raising=False)
+    monkeypatch.delenv("BT_TAKER_FEE", raising=False)
+    cfg = build_run_config("catalog", "SPY.ARCA", _settings())
+    assert cfg.venues[0].name == "ARCA"
+    assert cfg.venues[0].starting_balances == ["10_000 USD"]
+    assert cfg.venues[0].fee_model.config["maker_fee_rate"] == 0.0001
+    assert cfg.venues[0].fee_model.config["taker_fee_rate"] == 0.0001
+
+
+def test_build_run_config_etf_uses_env_fees_when_present(monkeypatch) -> None:
+    monkeypatch.setenv("BT_MAKER_FEE", "0.0003")
+    monkeypatch.setenv("BT_TAKER_FEE", "0.0004")
+    cfg = build_run_config("catalog", "SPY.ARCA", _settings())
+    assert cfg.venues[0].fee_model.config["maker_fee_rate"] == 0.0003
+    assert cfg.venues[0].fee_model.config["taker_fee_rate"] == 0.0004
+
+
+def test_build_run_config_okx_unchanged() -> None:
+    cfg = build_run_config("catalog", "BTC-USDT-SWAP.OKX", _settings())
+    assert cfg.venues[0].name == "OKX"
+    assert cfg.venues[0].starting_balances == ["10_000 USDT"]
+    assert cfg.venues[0].fee_model.config["maker_fee_rate"] == 0.0002
+    assert cfg.venues[0].fee_model.config["taker_fee_rate"] == 0.0005

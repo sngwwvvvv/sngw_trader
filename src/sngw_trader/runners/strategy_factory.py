@@ -13,7 +13,10 @@ from sngw_trader.strategies.err_momentum_regime import ErrMomentumRegime, ErrMom
 
 
 def source_bar_type(instrument_id: str) -> str:
-    return f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"
+    # in-function import: backtest_okx imports strategy_factory at module top level
+    from sngw_trader.runners.backtest_okx import default_bar_type
+
+    return default_bar_type(instrument_id)
 
 
 def build_err_mom_a(settings: Settings) -> Strategy:
