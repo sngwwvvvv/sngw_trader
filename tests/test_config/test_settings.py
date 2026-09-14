@@ -136,6 +136,9 @@ def test_load_settings_parses_catalog_range(monkeypatch) -> None:
 
 def test_load_settings_without_catalog_range_succeeds(monkeypatch) -> None:
     monkeypatch.setenv("OKX_ENV", "demo")
+    monkeypatch.delenv("CATALOG_START", raising=False)
+    monkeypatch.delenv("CATALOG_END", raising=False)
+    monkeypatch.setattr("sngw_trader.config.settings.load_dotenv", lambda path=".env": None)
     s = load_settings()
     assert s.catalog_start is None
     assert s.catalog_end is None

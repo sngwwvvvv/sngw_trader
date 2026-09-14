@@ -1,6 +1,6 @@
 from nautilus_trader.model import Bar, BarType
 
-from sngw_trader.data.catalog_writer import raw_candle_to_bar
+from sngw_trader.data.catalog_writer import raw_candle_to_bar, run_download
 from sngw_trader.runners.backtest_okx import default_bar_type
 
 
@@ -25,3 +25,17 @@ def test_bar_type_matches_backtest_runner() -> None:
     assert raw_candle_to_bar(["1", "2", "3", "2", "2", "1", "", "", ""],
                              "BTC-USDT-SWAP.OKX", 1, 0).bar_type \
         == BarType.from_str(default_bar_type("BTC-USDT-SWAP.OKX"))
+
+
+def test_run_download_dispatches_yahoo_etf(monkeypatch) -> None:
+    called = {}
+
+    def fake_download(settings, catalog):
+        called["yes"] = True
+
+    monkeypatch.setattr(
+        "sngw_trader.data.yahoo_etf.download_and_write", fake_download
+    )
+    settings = type("S", (), {"catalog_source": "yahoo-etf"})()
+    run_download(settings, catalog=object())
+    assert called["yes"] is True

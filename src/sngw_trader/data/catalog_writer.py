@@ -145,25 +145,31 @@ def download_bars(
     return bars
 
 
-def main() -> None:
-    settings = load_settings()
-    settings.catalog_path.mkdir(parents=True, exist_ok=True)
-    catalog = ParquetDataCatalog(settings.catalog_path)
+def run_download(settings: Settings, catalog: ParquetDataCatalog) -> None:
+    if settings.catalog_source == "yahoo-etf":
+        from sngw_trader.data.yahoo_etf import download_and_write
 
+        download_and_write(settings, catalog)
+        return
     instrument = load_instrument(settings)
     catalog.write_data([instrument], data_cls=Instrument)
-
     bars = download_bars(settings, instrument)
     if not bars:
         raise SystemExit("No candles downloaded for the requested range")
     catalog.write_data(bars, data_cls=Bar)
-
     first = min(b.ts_event for b in bars)
     last = max(b.ts_event for b in bars)
     print(
         f"Wrote {len(bars)} bars for {settings.instrument_id_str} "
         f"({_fmt(first)} -> {_fmt(last)}) to {settings.catalog_path}"
     )
+
+
+def main() -> None:
+    settings = load_settings()
+    settings.catalog_path.mkdir(parents=True, exist_ok=True)
+    catalog = ParquetDataCatalog(settings.catalog_path)
+    run_download(settings, catalog)
 
 
 def _fmt(ns: int) -> str:

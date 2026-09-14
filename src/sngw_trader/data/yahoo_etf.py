@@ -5,13 +5,14 @@ Do not place orders here. Do not import runners or strategies.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from nautilus_trader.model import Bar, BarType
 from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
-from nautilus_trader.model.instruments import Equity
+from nautilus_trader.model.instruments import Equity, Instrument
 from nautilus_trader.model.objects import Price, Quantity
 
 _PRICE_PREC = 2
@@ -102,3 +103,60 @@ def build_equity(symbol: str) -> Equity:
         ts_event=0,
         ts_init=0,
     )
+
+
+def fetch_daily_bars(symbol: str, start: datetime | None, end: datetime | None):
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise SystemExit('yfinance is required. Install with: pip install -e ".[etf]"') from exc
+    kwargs: dict = {"interval": "1d", "auto_adjust": True, "actions": False}
+    if start is None and end is None:
+        kwargs["period"] = "max"
+    else:
+        if start is not None:
+            kwargs["start"] = start
+        if end is not None:
+            kwargs["end"] = end
+    return yf.Ticker(symbol).history(**kwargs)
+
+
+def download_and_write(settings, catalog) -> None:
+    symbols = parse_etf_symbols(settings.etf_symbols)
+    if not symbols:
+        raise SystemExit("ETF_SYMBOLS is empty")
+
+    written: list[str] = []
+    for i, symbol in enumerate(symbols):
+        instrument_id = instrument_id_for(symbol)
+        inst = build_equity(symbol)
+        catalog.write_data([inst], data_cls=Instrument)
+        df = fetch_daily_bars(symbol, settings.catalog_start, settings.catalog_end)
+        if df is None or getattr(df, "empty", True):
+            extra = f" already wrote {','.join(written)}" if written else ""
+            raise SystemExit(f"No Yahoo daily bars for {symbol}.{extra}")
+        bars = []
+        for idx, row in df.iterrows():
+            vol = row["Volume"] if "Volume" in row.index else 0
+            bars.append(
+                row_to_bar(
+                    instrument_id,
+                    idx,
+                    row["Open"],
+                    row["High"],
+                    row["Low"],
+                    row["Close"],
+                    vol,
+                )
+            )
+        catalog.write_data(bars, data_cls=Bar)
+        first = min(b.ts_event for b in bars)
+        last = max(b.ts_event for b in bars)
+        print(
+            f"Wrote {len(bars)} daily bars for {instrument_id} "
+            f"({datetime.fromtimestamp(first / 1e9, tz=timezone.utc).date()} -> "
+            f"{datetime.fromtimestamp(last / 1e9, tz=timezone.utc).date()})"
+        )
+        written.append(symbol)
+        if i + 1 < len(symbols):
+            time.sleep(0.2)
