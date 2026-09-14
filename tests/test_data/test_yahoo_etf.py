@@ -149,6 +149,30 @@ def test_download_and_write_writes_equity_and_bars(monkeypatch) -> None:
     )
 
 
+def test_download_and_write_drops_nan_price_rows(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "Open": [100.0, float("nan")],
+            "High": [101.0, float("nan")],
+            "Low": [99.0, float("nan")],
+            "Close": [100.5, float("nan")],
+            "Volume": [1000, 0],
+        },
+        index=pd.DatetimeIndex(["2020-01-02", "2020-01-03"], tz="UTC"),
+    )
+    monkeypatch.setattr(
+        "sngw_trader.data.yahoo_etf.fetch_daily_bars",
+        lambda symbol, start, end: df,
+    )
+    monkeypatch.setattr("sngw_trader.data.yahoo_etf.time.sleep", lambda _s: None)
+    catalog = _FakeCatalog()
+    download_and_write(_settings(etf_symbols="SPY"), catalog)
+    bar_batches = [rows for rows, cls in catalog.writes if cls is Bar]
+    assert len(bar_batches) == 1
+    assert len(bar_batches[0]) == 1
+    assert str(bar_batches[0][0].close) == "100.50"
+
+
 def test_download_and_write_empty_frame_mentions_written(monkeypatch) -> None:
     spy = pd.DataFrame(
         {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1]},

@@ -135,6 +135,7 @@ def download_and_write(settings, catalog) -> None:
         if df is None or getattr(df, "empty", True):
             extra = f" already wrote {','.join(written)}" if written else ""
             raise SystemExit(f"No Yahoo daily bars for {symbol}.{extra}")
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
         bars = []
         for idx, row in df.iterrows():
             vol = row["Volume"] if "Volume" in row.index else 0

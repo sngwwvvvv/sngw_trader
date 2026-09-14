@@ -452,7 +452,7 @@ Yahoo/yfinance는 catalog writer뿐이다.
 
 - [ ] 이번 변경이 전략인가, 러너인가, 배포인가? 한 가지인가?
 - [ ] 거래소 HTTP/WS를 직접 여는 코드가 없는가?
-- [ ] InstrumentId에 `.OKX`가 있는가?
+- [ ] 라이브라면 InstrumentId가 `*.OKX` 인가? 백테스트/catalog는 `{SYMBOL}.{VENUE}` 형태인가?
 - [ ] 라이브 기본값이 demo인가?
 - [ ] 키가 파일에 없는가?
 - [ ] 콜백이 블로킹되지 않는가?
