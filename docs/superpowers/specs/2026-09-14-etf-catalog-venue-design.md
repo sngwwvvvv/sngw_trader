@@ -24,6 +24,8 @@ OKX-only 계약을 **데이터 경로만** 넓힌다. Yahoo에서 US ETF 일봉�
 | OKX 경로 | 기존 1분봉 writer·`CATALOG_START`/`END` 필수 규칙 유지 |
 | 라이브 | `live_okx.py` 그대로. ETF 라이브 없음 |
 
+시간봉(Alpaca SIP 등)은 이번 범위 밖이다. 일봉 catalog와 일봉 백테스트가 돈 뒤에 별도 스펙으로 넣는다.
+
 ## 3. 규칙 문서 변경
 
 `NAUTILUS_VIBE_RULES.md`와 `AGENTS.md`에서 “거래소는 OKX만”을 아래로 교체한다. Nautilus 노드가 러너인 원칙은 유지한다.
@@ -232,6 +234,7 @@ python -c "from nautilus_trader.model.instruments import Equity; import inspect;
 
 - 토스증권/IB 라이브 어댑터
 - CME 선물, FX 현물, Yahoo 1분/1시간
+- Alpaca 시간봉/분봉 catalog (일봉 백테스트 이후 별도 스펙)
 - Databento
 - ETF 섹터 11종 기본 리스트 확장 (env로 가능, 기본은 3종)
 - 점진적 catalog 이어받기 (재실행 시 해당 심볼 다시 씀)
