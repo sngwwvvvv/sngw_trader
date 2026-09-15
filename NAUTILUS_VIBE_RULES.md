@@ -314,7 +314,7 @@ Nautilus 기본 ID 체계가 하이픈을 넣으면 반드시 끈다.
 
 - 라이브 시세는 OKX data client만.
 - 백테스트 시세는 catalog의 `Bar` (OKX 1분 또는 ETF 일봉).
-- writer만 Yahoo/OKX HTTP를 연다.
+- writer만 Yahoo/OKX/FRED HTTP를 연다.
 - 전략은 출처를 모른다. `BarType`만 안다.
 
 BarType 예:
