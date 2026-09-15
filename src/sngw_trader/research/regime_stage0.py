@@ -20,8 +20,17 @@ from sngw_trader.data.regime_universe import (
     ALL_EVAL_ETFS,
     CYC_ETFS,
     DEF_ETFS,
+    QUALITY_INVALID,
     SECTOR_ETFS,
     instrument_id_for,
+)
+from sngw_trader.indicators.regime import (
+    IQR_LONG,
+    MEDIAN_WINDOW,
+    R0,
+    label_series,
+    robust_z,
+    stress_score,
 )
 from sngw_trader.research.regime_config import (
     DEFAULT_REGIME_CONFIG,
@@ -242,34 +251,74 @@ def _eval_window(
     }
 
 
+def rescored_codes(snapshots: list, median_window: int) -> dict[str, int]:
+    """Re-derive regime_code per session at a different robust_z median window.
+
+    Reuses robust_z/stress_score/label_series on the raw aligned inputs stored
+    on the snapshots (oas, vix_vxv, copper_gold). Alignment and quality are
+    window-independent, so only the z median window changes; invalid-quality
+    and NaN-z sessions stay R0 (same rules as build_snapshots).
+
+    Snapshots omit the warmup segment (first IQR_LONG-1 aligned sessions), so
+    z at emitted index j is exact only once the long IQR window lies entirely
+    inside the stored series (j >= IQR_LONG-1); earlier sessions are labeled
+    R0 (not exactly rescorable) instead of silently biased.
+    """
+    snaps = sorted(snapshots, key=lambda s: s.session_date)
+
+    def col(getter) -> np.ndarray:
+        return np.asarray([float(getter(s)) for s in snaps], dtype=float)
+
+    oas_z = robust_z(col(lambda s: s.oas), median_window=median_window)
+    vix_vxv_z = robust_z(col(lambda s: s.vix_vxv), median_window=median_window)
+    growth_z = robust_z(col(lambda s: s.copper_gold), median_window=median_window)
+    labels = label_series(stress_score(oas_z, vix_vxv_z), growth_z)
+    codes: dict[str, int] = {}
+    for j, (s, lab) in enumerate(zip(snaps, labels)):
+        if s.quality_code == QUALITY_INVALID or lab == -1 or j < IQR_LONG - 1:
+            codes[s.session_date] = R0
+        else:
+            codes[s.session_date] = int(lab)
+    return codes
+
+
 def run_stage0(
     sessions: list[date],
     opens: dict[str, dict[date, float]],
     snapshots: list,
     config: RegimeExperimentConfig | None = None,
     block: int = MAIN_BLOCK,
+    median_window: int | None = None,
     robustness: bool = False,
 ) -> dict:
     """JSON-serializable Stage 0 probe over dev/validation/test windows.
 
-    W (block) is the moving-block bootstrap window: MAIN_BLOCK=60 for the main
-    run; config.robustness_window (120) runs once via the same functions and is
-    never adopted.
+    `block` is the moving-block bootstrap length (MAIN_BLOCK=60, kept fixed
+    across runs). `median_window` re-scores regime codes via robust_z at that
+    median window: None keeps the stored W=60 codes; the one-shot robustness
+    appendix uses config.robustness_window (120) and is never adopted.
     """
     config = config or DEFAULT_REGIME_CONFIG
     member_opens = {
         line: {m: opens[m] for m in members} for line, members in LINES.items()
     }
+    if median_window is None:
+        codes_all = {
+            s.session_date: int(s.regime_code) for s in snapshots
+        }
+    else:
+        codes_all = rescored_codes(snapshots, median_window)
     windows = {}
     for name in ("dev", "validation", "test"):
         codes = {
-            date.fromisoformat(s.session_date): int(s.regime_code)
-            for s in snapshots
-            if _window_of(s.session_date, config) == name
+            date.fromisoformat(k): c
+            for k, c in codes_all.items()
+            if _window_of(k, config) == name
         }
         windows[name] = _eval_window(name, codes, sessions, member_opens, config, block)
     return {
         "block": block,
+        "median_window": median_window if median_window is not None else MEDIAN_WINDOW,
         "robustness": robustness,
         "horizons": list(config.FWD_HORIZONS),
         "lines": sorted(LINES),
@@ -323,7 +372,8 @@ def main() -> None:
     config = DEFAULT_REGIME_CONFIG
     run = run_stage0(sessions, opens, snaps, config, block=MAIN_BLOCK)
     robust = run_stage0(
-        sessions, opens, snaps, config, block=config.robustness_window, robustness=True
+        sessions, opens, snaps, config, block=MAIN_BLOCK,
+        median_window=config.robustness_window, robustness=True,
     )
     ok, reasons = validation_verdict(run, config)
 
