@@ -64,6 +64,10 @@ def test_catalog_roundtrip(tmp_path: Path) -> None:
     out = catalog.custom_data(cls=RegimeSnapshot)
     assert len(out) == 1
     got = out[0]
+    # Data-subclass custom types read back wrapped in CustomData (matches
+    # regime_stage0's `cd.data` unpacking).
+    if hasattr(got, "data"):
+        got = got.data
     assert got.session_date == "2020-01-02"
     assert got.source_snapshot_id == "snap-1"
     assert got.regime_code == 0

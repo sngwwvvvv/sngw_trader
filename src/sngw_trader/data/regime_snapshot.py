@@ -1,8 +1,9 @@
+from nautilus_trader.core.data import Data
 from nautilus_trader.model.custom import customdataclass
 
 
 @customdataclass
-class RegimeSnapshot:
+class RegimeSnapshot(Data):
     session_date: str
     oas: float
     vix: float
