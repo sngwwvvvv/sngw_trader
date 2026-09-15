@@ -143,6 +143,12 @@ def test_synthetic_fill_price_is_next_session_open(tmp_path: Path) -> None:
     )
     fills = node.get_engines()[0].trader.generate_order_fills_report()
     assert not fills.empty, "stub strategy produced no fills"
+    # ponytail: MARKET orders in nautilus 1.231.0 fill at the decision
+    # session's close (immediate match, AT_THE_OPEN unsupported); this catalog
+    # makes close(d)==open(d+1) so the assertion below holds under both fill
+    # semantics. It proves plumbing, not next-open fills — the 다음 세션 시가
+    # requirement is enforced at the strategy level in Task 13 by submitting
+    # on the first bar of session D+1.
     # One market order per session; each fills at the NEXT session's open
     # (synthetic data: open(d+1) == close(d) = 101.0 + i). The final session's
     # order has no next session and fills at its own close instead.

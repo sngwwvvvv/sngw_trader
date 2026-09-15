@@ -6,6 +6,7 @@ runners are the only runners.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 
@@ -29,6 +30,8 @@ from sngw_trader.data.regime_universe import sector_instrument_ids
 from sngw_trader.data.yahoo_etf import etf_bar_type
 
 _DEFAULT_FEE = 0.0005
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _fee_model_config() -> ImportableFeeModelConfig:
@@ -133,7 +136,7 @@ def run_etf_regime_backtest(
         )
     if strategy is not None:
         engine.trader.add_strategy(strategy)
-    print(
+    _LOGGER.info(
         "RegimeSnapshot loaded via BacktestDataConfig"
         if direct
         else "RegimeSnapshot loaded via engine.add_data fallback"
