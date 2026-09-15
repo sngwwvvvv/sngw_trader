@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 
+from sngw_trader.research.regime_config import DEFAULT_REGIME_CONFIG
 from sngw_trader.data.regime_universe import (
     SECTOR_ETFS,
     session_age,
@@ -48,3 +49,7 @@ def test_session_date_from_ts_utc() -> None:
 
     ts = int(datetime(2020, 1, 2, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
     assert session_date_from_ts(ts) == "2020-01-02"
+
+
+def test_default_config_robustness_window() -> None:
+    assert DEFAULT_REGIME_CONFIG.robustness_window == 120

@@ -25,6 +25,7 @@ class RegimeExperimentConfig:
     TOP_K: int = 3
     ONE_WAY_FEE: float = 0.0005
     STARTING_BALANCE: str = "1_000_000 USD"
+    robustness_window: int = 120  # 1회만, 채택 그리드 아님
 
 
 DEFAULT_REGIME_CONFIG = RegimeExperimentConfig()
