@@ -190,9 +190,149 @@ _ACTIVE_PHASES = (
 )
 
 
+def _finite_value(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def _leg_held(state: ExecutionState, leg: LegState) -> Decimal:
     """Held quantity for a leg: remaining holding during exit, executed fill otherwise."""
+    if state.phase is ExecutionPhase.CLOSED:
+        return Decimal("0")
     if state.phase in (ExecutionPhase.EXIT_PENDING, ExecutionPhase.EXIT_PARTIAL):
         target = leg.target_quantity or Decimal("0")
         return max(target - leg.filled_quantity, Decimal("0"))
     return leg.filled_quantity
+
+
+def begin_entry(
+    state: ExecutionState,
+    y_quantity: Decimal,
+    x_quantity: Decimal,
+    y_order_id: str,
+    x_order_id: str,
+    deadline: float,
+    entry_beta: float,
+) -> TransitionResult:
+    if state.recovery_reason is not None or state.phase is ExecutionPhase.BLOCKED:
+        return TransitionResult(state, reasons=("ENTRIES_BLOCKED",))
+    if state.phase not in (ExecutionPhase.IDLE, ExecutionPhase.CLOSED):
+        return TransitionResult(state, reasons=("PHASE_NOT_IDLE",))
+    try:
+        y_qty = _decimal("y_quantity", y_quantity)
+        x_qty = _decimal("x_quantity", x_quantity)
+    except ValueError:
+        return TransitionResult(state, reasons=("INVALID_QUANTITY",))
+    if y_qty <= 0 or x_qty <= 0:
+        return TransitionResult(state, reasons=("INVALID_QUANTITY",))
+    if not y_order_id or not x_order_id:
+        return TransitionResult(state, reasons=("MISSING_ORDER_ID",))
+    if not _finite_value(deadline) or not _finite_value(entry_beta):
+        return TransitionResult(state, reasons=("INVALID_INPUT",))
+    legs = MappingProxyType(
+        {
+            "Y": LegState("Y", y_qty, Decimal("0"), y_order_id, LegStatus.PENDING),
+            "X": LegState("X", x_qty, Decimal("0"), x_order_id, LegStatus.PENDING),
+        }
+    )
+    new_state = replace(
+        state,
+        phase=ExecutionPhase.ENTRY_PENDING,
+        legs=legs,
+        pending_order_ids=frozenset({y_order_id, x_order_id}),
+        deadline=deadline,
+        entry_beta=entry_beta,
+        cooldown_deadline=None,
+        entries_started=state.entries_started + 1,
+        recovery_reason=None,
+        fill_ids=frozenset(),
+    )
+    actions = (
+        ActionIntent(SUBMIT, leg="Y", client_order_id=y_order_id, quantity=y_qty),
+        ActionIntent(SUBMIT, leg="X", client_order_id=x_order_id, quantity=x_qty),
+    )
+    return TransitionResult(new_state, actions)
+
+
+def begin_exit(
+    state: ExecutionState,
+    y_order_id: str,
+    x_order_id: str,
+    deadline: float,
+) -> TransitionResult:
+    if state.phase is not ExecutionPhase.OPEN:
+        return TransitionResult(state, reasons=("PHASE_NOT_OPEN",))
+    if state.recovery_reason is not None:
+        return TransitionResult(state, reasons=("ENTRIES_BLOCKED",))
+    if not y_order_id or not x_order_id:
+        return TransitionResult(state, reasons=("MISSING_ORDER_ID",))
+    if not _finite_value(deadline):
+        return TransitionResult(state, reasons=("INVALID_INPUT",))
+    legs = MappingProxyType(
+        {
+            "Y": replace(
+                state.legs["Y"],
+                client_order_id=y_order_id,
+                filled_quantity=Decimal("0"),
+                status=LegStatus.PENDING,
+            ),
+            "X": replace(
+                state.legs["X"],
+                client_order_id=x_order_id,
+                filled_quantity=Decimal("0"),
+                status=LegStatus.PENDING,
+            ),
+        }
+    )
+    new_state = replace(
+        state,
+        phase=ExecutionPhase.EXIT_PENDING,
+        legs=legs,
+        pending_order_ids=frozenset({y_order_id, x_order_id}),
+        deadline=deadline,
+        exits_started=state.exits_started + 1,
+        fill_ids=frozenset(),
+    )
+    actions = (
+        ActionIntent(SUBMIT, leg="Y", client_order_id=y_order_id, quantity=state.legs["Y"].filled_quantity),
+        ActionIntent(SUBMIT, leg="X", client_order_id=x_order_id, quantity=state.legs["X"].filled_quantity),
+    )
+    return TransitionResult(new_state, actions)
+
+
+def on_fill(state: ExecutionState, fill: FillObservation) -> TransitionResult:
+    if state.phase not in _ACTIVE_PHASES:
+        return TransitionResult(state, reasons=("PHASE_NOT_ACTIVE",))
+    leg_state = state.legs.get(fill.leg)
+    if leg_state is None:
+        return TransitionResult(state, reasons=("MISSING_LEG",))
+    if fill.fill_id in state.fill_ids:
+        return TransitionResult(state, reasons=("DUPLICATE_FILL",))
+    target = leg_state.target_quantity or Decimal("0")
+    filled = leg_state.filled_quantity + fill.quantity
+    if filled > target:
+        return TransitionResult(state, reasons=("OVERFILL",))
+    legs = dict(state.legs)
+    legs[fill.leg] = replace(
+        leg_state,
+        filled_quantity=filled,
+        status=LegStatus.FILLED if filled == target else LegStatus.PARTIAL,
+    )
+    all_filled = all(leg.status is LegStatus.FILLED for leg in legs.values())
+    entry = state.phase in (ExecutionPhase.ENTRY_PENDING, ExecutionPhase.ENTRY_PARTIAL)
+    if all_filled:
+        phase = ExecutionPhase.OPEN if entry else ExecutionPhase.CLOSED
+    else:
+        phase = ExecutionPhase.ENTRY_PARTIAL if entry else ExecutionPhase.EXIT_PARTIAL
+    new_state = replace(
+        state,
+        phase=phase,
+        legs=MappingProxyType(legs),
+        fill_ids=state.fill_ids | {fill.fill_id},
+        pending_order_ids=frozenset() if all_filled else state.pending_order_ids,
+        deadline=None if all_filled else state.deadline,
+    )
+    return TransitionResult(new_state)
