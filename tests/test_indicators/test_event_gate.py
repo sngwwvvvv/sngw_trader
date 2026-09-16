@@ -179,3 +179,61 @@ def test_nonfinite_now_fails_closed():
 def test_invalid_input_beats_all_other_reasons():
     decision = _evaluate(last_event_check=200.0, events=(_record(),))
     assert decision.reasons == ("INVALID_INPUT",)
+
+
+def test_manual_kill_routes_emergency_flatten():
+    decision = _evaluate(events=(_record(event_type=EventType.MANUAL_KILL),))
+    assert decision.exit_action == EXIT_EMERGENCY
+    assert decision.reasons == ("EVENT_ACTIVE_MANUAL_KILL",)
+
+
+def test_news_routes_orderly_exit():
+    decision = _evaluate(events=(_record(),))
+    assert decision.exit_action == EXIT_ORDERLY
+
+
+def test_halt_routes_orderly_exit():
+    decision = _evaluate(events=(_record(event_type=EventType.HALT),))
+    assert decision.exit_action == EXIT_ORDERLY
+
+
+def test_emergency_wins_over_orderly():
+    news = _record(event_id="a", event_type=EventType.NEWS)
+    kill = _record(event_id="b", event_type=EventType.MANUAL_KILL)
+    decision = _evaluate(events=(news, kill))
+    assert decision.exit_action == EXIT_EMERGENCY
+    reversed_decision = _evaluate(events=(kill, news))
+    assert reversed_decision.exit_action == EXIT_EMERGENCY
+    assert reversed_decision.reasons == decision.reasons
+
+
+def test_orderly_does_not_downgrade_emergency():
+    kill = _record(event_id="a", event_type=EventType.MANUAL_KILL)
+    news = _record(event_id="b", event_type=EventType.NEWS)
+    assert _evaluate(events=(kill, news)).exit_action == EXIT_EMERGENCY
+
+
+def test_expired_kill_emits_no_exit():
+    decision = _evaluate(events=(_record(event_type=EventType.MANUAL_KILL, expires_at=140.0),))
+    assert decision.exit_action == EXIT_NONE
+    assert decision.entries_allowed is True
+
+
+def test_disputed_event_blocks_entries_without_exit():
+    decision = _evaluate(events=(_record(source_status=SOURCE_DISPUTED),))
+    assert decision.entries_allowed is False
+    assert decision.reasons == ("SOURCE_DISPUTED",)
+    assert decision.exit_action == EXIT_NONE
+
+
+def test_stale_feed_suppresses_exit_action():
+    decision = _evaluate(
+        events=(_record(event_type=EventType.MANUAL_KILL),), last_event_check=80.0
+    )
+    assert decision.exit_action == EXIT_NONE
+    assert decision.reasons == ("STALE_EVENT_STATE", "EVENT_ACTIVE_MANUAL_KILL")
+
+
+def test_missing_feed_suppresses_exit_action():
+    decision = _evaluate(events=())
+    assert decision.exit_action == EXIT_NONE

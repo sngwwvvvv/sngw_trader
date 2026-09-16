@@ -113,6 +113,7 @@ def evaluate_gate(
     ):
         return GateDecision(False, ("INVALID_INPUT",), EXIT_NONE)
     reasons: list[str] = []
+    exit_action = EXIT_NONE
     if not events:
         _add_reason(reasons, "MISSING_EVENT_STATE")
     if now - last_event_check > limits.max_event_age_seconds:
@@ -128,4 +129,10 @@ def evaluate_gate(
             _add_reason(reasons, "SOURCE_DISPUTED")
             continue
         _add_reason(reasons, f"EVENT_ACTIVE_{event.event_type.value}")
-    return GateDecision(not reasons, tuple(reasons), EXIT_NONE)
+        if event.event_type is EventType.MANUAL_KILL:
+            exit_action = EXIT_EMERGENCY
+        elif exit_action is not EXIT_EMERGENCY:
+            exit_action = EXIT_ORDERLY
+    if "MISSING_EVENT_STATE" in reasons or "STALE_EVENT_STATE" in reasons:
+        exit_action = EXIT_NONE
+    return GateDecision(not reasons, tuple(reasons), exit_action)
