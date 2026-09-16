@@ -9,7 +9,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime
 
 FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -39,6 +39,10 @@ def fetch_fred_series(
 ) -> list[tuple[date, float]]:
     if opener is None:
         opener = urllib.request.urlopen
+    if isinstance(start, datetime):
+        start = start.date()
+    if isinstance(end, datetime):
+        end = end.date()
     params: dict[str, str] = {
         "series_id": series_id,
         "api_key": fred_api_key(),

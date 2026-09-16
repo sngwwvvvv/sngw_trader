@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -46,3 +46,32 @@ def test_missing_api_key_exits(monkeypatch) -> None:
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     with pytest.raises(SystemExit):
         fetch_fred_series("VIXCLS", None, None, opener=lambda *a, **k: None)
+
+
+def test_fetch_accepts_datetime_bounds(monkeypatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "test-key")
+    calls = {}
+
+    class _Resp:
+        def read(self) -> bytes:
+            return b'{"observations":[]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:
+            return None
+
+    def opener(req, timeout=30):
+        calls["url"] = req.full_url
+        return _Resp()
+
+    fetch_fred_series(
+        "BAMLH0A0HYM2",
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+        datetime(2020, 1, 31, tzinfo=timezone.utc),
+        opener=opener,
+    )
+    assert "observation_start=2020-01-01" in calls["url"]
+    assert "observation_end=2020-01-31" in calls["url"]
+    assert "T00%3A00%3A00" not in calls["url"]
