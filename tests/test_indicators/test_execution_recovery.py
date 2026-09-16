@@ -16,6 +16,8 @@ from sngw_trader.indicators.execution_recovery import (
     on_timeout,
     begin_entry,
     begin_exit,
+    confirm_flatten,
+    emergency_flatten,
     CANCEL_UNFILLED,
     FLATTEN_FILLED,
     SUBMIT,
@@ -276,3 +278,64 @@ def test_slippage_rejection_with_strict_limit():
     strict = _entered(max_slippage_bps=Decimal("10"))
     result = on_fill(strict, FillObservation("Y", "f1", "4", "100.3", "100"))
     assert result.reasons == ("SLIPPAGE_EXCEEDED",)
+
+
+def _flattening() -> ExecutionState:
+    return on_timeout(_partially_filled(), now=100.1).state
+
+
+def test_emergency_flatten_from_partial_fill():
+    result = emergency_flatten(_partially_filled())
+    assert result.state.phase is ExecutionPhase.FLATTENING
+    assert result.state.rollbacks == 1
+    assert ActionIntent(FLATTEN_FILLED, leg="Y", quantity=Decimal("10")) in result.actions
+
+
+def test_emergency_flatten_without_exposure_is_noop():
+    result = emergency_flatten(ExecutionState())
+    assert result.reasons == ("NO_EXPOSURE",)
+    assert result.state.phase is ExecutionPhase.IDLE
+
+
+def test_emergency_flatten_twice_is_rejected():
+    once = emergency_flatten(_partially_filled())
+    again = emergency_flatten(once.state)
+    assert again.reasons == ("ALREADY_FLATTENING",)
+
+
+def test_confirm_flatten_completes_to_closed_with_cooldown():
+    state = _flattening()
+    result = confirm_flatten(
+        state,
+        (FillObservation("Y", "g1", "10", "100", "100"),),
+        cooldown_deadline=999.0,
+    )
+    assert result.state.phase is ExecutionPhase.CLOSED
+    assert result.state.cooldown_deadline == 999.0
+    assert result.state.exposure == Decimal("0")
+
+
+def test_confirm_flatten_incomplete_stays_flattening():
+    result = confirm_flatten(_flattening(), (FillObservation("Y", "g1", "4", "100", "100"),), cooldown_deadline=999.0)
+    assert result.reasons == ("FLATTEN_INCOMPLETE",)
+    assert result.state.phase is ExecutionPhase.FLATTENING
+    assert result.state.cooldown_deadline is None
+
+
+def test_confirm_flatten_rejects_overfill():
+    result = confirm_flatten(_flattening(), (FillObservation("Y", "g1", "11", "100", "100"),), cooldown_deadline=999.0)
+    assert result.reasons == ("INVALID_QUANTITY",)
+
+
+def test_confirm_flatten_ignores_duplicate_fill_id():
+    state = _flattening()
+    first = confirm_flatten(state, (FillObservation("Y", "g1", "4", "100", "100"),), cooldown_deadline=999.0)
+    assert first.reasons == ("FLATTEN_INCOMPLETE",)
+    second = confirm_flatten(first.state, (FillObservation("Y", "g1", "4", "100", "100"),), cooldown_deadline=999.0)
+    assert second.reasons == ("FLATTEN_INCOMPLETE",)
+    assert second.state.legs["Y"].filled_quantity == Decimal("6")
+
+
+def test_confirm_flatten_requires_flattening_phase():
+    result = confirm_flatten(ExecutionState(), (), cooldown_deadline=999.0)
+    assert result.reasons == ("PHASE_NOT_FLATTENING",)

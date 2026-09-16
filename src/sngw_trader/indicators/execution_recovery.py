@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import enum
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -386,3 +386,53 @@ def on_order_failure(state: ExecutionState, leg: str) -> TransitionResult:
     if leg not in state.legs:
         return TransitionResult(state, reasons=("MISSING_LEG",))
     return _rollback(state, "rollbacks")
+
+
+def emergency_flatten(state: ExecutionState) -> TransitionResult:
+    if state.phase is ExecutionPhase.FLATTENING:
+        return TransitionResult(state, reasons=("ALREADY_FLATTENING",))
+    if state.phase in (ExecutionPhase.IDLE, ExecutionPhase.CLOSED):
+        return TransitionResult(state, reasons=("NO_EXPOSURE",))
+    return _rollback(state, "rollbacks")
+
+
+def confirm_flatten(
+    state: ExecutionState,
+    fills: Sequence[FillObservation],
+    cooldown_deadline: float,
+) -> TransitionResult:
+    if state.phase is not ExecutionPhase.FLATTENING:
+        return TransitionResult(state, reasons=("PHASE_NOT_FLATTENING",))
+    if not _finite_value(cooldown_deadline):
+        return TransitionResult(state, reasons=("INVALID_INPUT",))
+    current = state
+    for fill in fills:
+        leg_state = current.legs.get(fill.leg)
+        if leg_state is None:
+            return TransitionResult(current, reasons=("MISSING_LEG",))
+        if fill.fill_id in current.fill_ids:
+            continue
+        if fill.quantity > leg_state.filled_quantity:
+            return TransitionResult(current, reasons=("INVALID_QUANTITY",))
+        remaining = leg_state.filled_quantity - fill.quantity
+        legs = dict(current.legs)
+        legs[fill.leg] = replace(
+            leg_state,
+            filled_quantity=remaining,
+            status=LegStatus.FLATTENING if remaining > 0 else LegStatus.IDLE,
+        )
+        current = replace(
+            current,
+            legs=MappingProxyType(legs),
+            fill_ids=current.fill_ids | {fill.fill_id},
+        )
+    if current.exposure > 0:
+        return TransitionResult(current, reasons=("FLATTEN_INCOMPLETE",))
+    new_state = replace(
+        current,
+        phase=ExecutionPhase.CLOSED,
+        pending_order_ids=frozenset(),
+        deadline=None,
+        cooldown_deadline=cooldown_deadline,
+    )
+    return TransitionResult(new_state)
