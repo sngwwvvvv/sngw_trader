@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sngw_trader.data.binance_oi import parse_metrics_csv
+from sngw_trader.data.binance_oi import parse_metrics_csv, scan_binance_oi
 
 HEADER = "create_time,symbol,sum_open_interest,sum_open_interest_value"
 
@@ -9,11 +9,11 @@ def _csv(*rows: str) -> str:
     return "\n".join([HEADER, *rows])
 
 
-def _five_minute_csv() -> str:
+def _five_minute_csv(day: str = "2023-06-01") -> str:
     return _csv(
-        "2023-06-01 00:00:00,BTCUSDT,111645.70,3036897096",
-        "2023-06-01 00:05:00,BTCUSDT,111650.87,3039706128",
-        "2023-06-01 00:10:00,BTCUSDT,111706.19,3042117013",
+        f"{day} 00:00:00,BTCUSDT,111645.70,3036897096",
+        f"{day} 00:05:00,BTCUSDT,111650.87,3039706128",
+        f"{day} 00:10:00,BTCUSDT,111706.19,3042117013",
     )
 
 
@@ -44,3 +44,45 @@ def test_parse_metrics_csv_rejects_coarser_interval() -> None:
 def test_parse_metrics_csv_unknown_on_short_input() -> None:
     assert parse_metrics_csv("create_time,symbol\n") == ([], "unknown")
     assert parse_metrics_csv("") == ([], "unknown")
+
+
+def test_scan_stops_at_era_end_and_dedupes() -> None:
+    days = {
+        date(2023, 5, 31): _five_minute_csv("2023-05-31"),
+        date(2023, 6, 1): _five_minute_csv("2023-06-01"),
+        date(2023, 6, 2): _csv(
+            "2023-06-02 00:00:00,BTCUSDT,1.0,1.0",
+            "2023-06-02 00:25:00,BTCUSDT,1.1,1.1",
+            "2023-06-02 00:50:00,BTCUSDT,1.2,1.2",
+        ),
+    }
+    points, era_end = scan_binance_oi(
+        date(2023, 5, 30), date(2023, 6, 30), fetch=days.get
+    )
+    assert era_end == date(2023, 6, 2)
+    # 30일은 404(None)로 스킵, 5m era 2일치 = 6 points (288 rows가 아닌 축소 샘플)
+    assert len(points) == 6
+    assert all(str(p.instrument_id) == "BTC-USDT-SWAP.OKX" for p in points)
+
+
+def test_scan_returns_all_5m_when_era_never_ends() -> None:
+    days = {date(2023, 6, d): _five_minute_csv(f"2023-06-0{d}") for d in (1, 2, 3)}
+    points, era_end = scan_binance_oi(date(2023, 6, 1), date(2023, 6, 3), fetch=days.get)
+    assert era_end is None
+    assert len(points) == 9
+
+
+def test_scan_dedupes_overlapping_rows_across_days() -> None:
+    day1 = _csv(
+        "2023-06-01 00:00:00,BTCUSDT,1.0,1.0",
+        "2023-06-01 00:05:00,BTCUSDT,1.1,1.1",
+    )
+    day2 = _csv(
+        "2023-06-01 00:05:00,BTCUSDT,9.9,9.9",
+        "2023-06-01 00:10:00,BTCUSDT,1.2,1.2",
+    )
+    days = {date(2023, 6, 1): day1, date(2023, 6, 2): day2}
+    points, era_end = scan_binance_oi(date(2023, 6, 1), date(2023, 6, 2), fetch=days.get)
+    assert era_end is None
+    assert len(points) == 3
+    assert [p.ts_event for p in points] == sorted(p.ts_event for p in points)

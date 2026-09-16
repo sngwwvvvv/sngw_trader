@@ -182,21 +182,21 @@ def download_open_interest(settings: "Settings", instrument_id: str) -> list[Ope
     )
 
 
-def open_interest_data_type(instrument_id: str) -> DataType:
+def open_interest_data_type(instrument_id: str, source: str | None = None) -> DataType:
     _require_oi_instrument(instrument_id)
     return DataType(
         OpenInterestPoint,
         metadata={
             "instrument_id": instrument_id,
             "source_endpoint": _OPEN_INTEREST_HISTORY_URL,
-            "open_interest_source": "OKX oi contract-value field",
+            "open_interest_source": source or "OKX oi contract-value field",
         },
     )
 
 
-def wrap_open_interest(point: OpenInterestPoint) -> CustomData:
+def wrap_open_interest(point: OpenInterestPoint, source: str | None = None) -> CustomData:
     _require_oi_instrument(point.instrument_id.value)
-    return CustomData(open_interest_data_type(point.instrument_id.value), point)
+    return CustomData(open_interest_data_type(point.instrument_id.value, source), point)
 
 
 _registered = False

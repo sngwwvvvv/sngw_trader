@@ -50,3 +50,70 @@ def parse_metrics_csv(csv_text: str) -> tuple[list[OpenInterestPoint], str]:
         for ts, oi in rows
     ]
     return points, interval
+
+
+def fetch_metrics_day(day: date, timeout: int = 60) -> str | None:
+    url = f"{METRICS_URL}/BTCUSDT-metrics-{day:%Y-%m-%d}.zip"
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        name = next(n for n in zf.namelist() if n.endswith(".csv"))
+        return zf.read(name).decode("utf-8")
+
+
+def scan_binance_oi(
+    start: date, end: date, fetch=fetch_metrics_day
+) -> tuple[list[OpenInterestPoint], date | None]:
+    """Days oldest->newest, stop at the first non-5m day. -> (points, era_end)."""
+    points: dict[int, OpenInterestPoint] = {}
+    day = start
+    while day <= end:
+        text = fetch(day)
+        if text is not None:
+            day_points, interval = parse_metrics_csv(text)
+            if interval != "5m":
+                return [points[ts] for ts in sorted(points)], day
+            for point in day_points:
+                points[point.ts_event] = point
+        day += timedelta(days=1)
+    return [points[ts] for ts in sorted(points)], None
+
+
+def write_binance_oi(settings, points: list[OpenInterestPoint]) -> None:
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    from sngw_trader.data.open_interest import register_open_interest, wrap_open_interest
+
+    register_open_interest()
+    catalog = ParquetDataCatalog(str(settings.catalog_path))
+    catalog.write_data(
+        [wrap_open_interest(point, source=BINANCE_OI_SOURCE) for point in points],
+        data_cls=OpenInterestPoint,
+    )
+
+
+def main() -> None:
+    import argparse
+
+    from sngw_trader.config import load_settings
+
+    parser = argparse.ArgumentParser(description="Download Binance OI proxy into the catalog")
+    parser.add_argument("--start", required=True, help="YYYY-MM-DD inclusive")
+    parser.add_argument("--end", required=True, help="YYYY-MM-DD inclusive")
+    args = parser.parse_args()
+    settings = load_settings()
+    points, era_end = scan_binance_oi(date.fromisoformat(args.start), date.fromisoformat(args.end))
+    if not points:
+        raise SystemExit("No 5m Binance OI rows in the requested range")
+    write_binance_oi(settings, points)
+    print(f"binance oi points={len(points)} era_end={era_end}")
+
+
+if __name__ == "__main__":
+    main()
