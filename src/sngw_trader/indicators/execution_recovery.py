@@ -336,3 +336,49 @@ def on_fill(state: ExecutionState, fill: FillObservation) -> TransitionResult:
         deadline=None if all_filled else state.deadline,
     )
     return TransitionResult(new_state)
+
+
+def _rollback(state: ExecutionState, counter: str) -> TransitionResult:
+    """Shared rollback: cancel pending orders, flatten any held exposure, else return to IDLE."""
+    actions: list[ActionIntent] = []
+    legs: dict[str, LegState] = {}
+    has_exposure = False
+    for name, leg in state.legs.items():
+        held = _leg_held(state, leg)
+        pending = leg.client_order_id is not None and leg.status in (
+            LegStatus.PENDING,
+            LegStatus.PARTIAL,
+        )
+        if pending:
+            actions.append(ActionIntent(CANCEL_UNFILLED, leg=name, client_order_id=leg.client_order_id))
+        if held > 0:
+            has_exposure = True
+            actions.append(ActionIntent(FLATTEN_FILLED, leg=name, quantity=held))
+            legs[name] = replace(leg, target_quantity=held, filled_quantity=held, status=LegStatus.FLATTENING)
+        else:
+            legs[name] = replace(leg, target_quantity=None, filled_quantity=Decimal("0"), status=LegStatus.IDLE)
+    new_state = replace(
+        state,
+        phase=ExecutionPhase.FLATTENING if has_exposure else ExecutionPhase.IDLE,
+        legs=MappingProxyType(legs),
+        pending_order_ids=frozenset(),
+        deadline=None,
+        **{counter: getattr(state, counter) + 1},
+    )
+    return TransitionResult(new_state, tuple(actions))
+
+
+def on_timeout(state: ExecutionState, now: float) -> TransitionResult:
+    if state.phase not in _ACTIVE_PHASES or state.deadline is None:
+        return TransitionResult(state, reasons=("TIMEOUT_NOT_APPLICABLE",))
+    if now < state.deadline:
+        return TransitionResult(state, reasons=("TIMEOUT_NOT_DUE",))
+    return _rollback(state, "timeouts")
+
+
+def on_order_failure(state: ExecutionState, leg: str) -> TransitionResult:
+    if state.phase not in _ACTIVE_PHASES:
+        return TransitionResult(state, reasons=("PHASE_NOT_ACTIVE",))
+    if leg not in state.legs:
+        return TransitionResult(state, reasons=("MISSING_LEG",))
+    return _rollback(state, "rollbacks")

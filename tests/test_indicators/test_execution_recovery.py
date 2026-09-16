@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from sngw_trader.indicators.execution_recovery import (
+    ActionIntent,
     ExecutionPhase,
     ExecutionState,
     FillObservation,
@@ -11,8 +12,12 @@ from sngw_trader.indicators.execution_recovery import (
     LegState,
     TransitionResult,
     on_fill,
+    on_order_failure,
+    on_timeout,
     begin_entry,
     begin_exit,
+    CANCEL_UNFILLED,
+    FLATTEN_FILLED,
     SUBMIT,
 )
 
@@ -197,3 +202,52 @@ def test_exit_full_fill_reaches_closed():
     exited = on_fill(exited.state, FillObservation("X", "f4", "8", "99", "99"))
     assert exited.state.phase is ExecutionPhase.CLOSED
     assert exited.state.exposure == Decimal("0")
+
+
+def _partially_filled() -> ExecutionState:
+    result = on_fill(_entered(), FillObservation("Y", "f1", "10", "100", "100"))
+    return result.state
+
+
+def test_timeout_before_deadline_is_not_due():
+    result = on_timeout(_entered(), now=99.9)
+    assert result.reasons == ("TIMEOUT_NOT_DUE",)
+    assert result.state.phase is ExecutionPhase.ENTRY_PENDING
+    assert result.state.timeouts == 0
+
+
+def test_timeout_after_deadline_without_exposure_returns_idle():
+    result = on_timeout(_entered(), now=100.1)
+    assert result.state.phase is ExecutionPhase.IDLE
+    assert result.state.timeouts == 1
+    assert result.state.pending_order_ids == frozenset()
+    assert result.state.deadline is None
+    assert {a.kind for a in result.actions} == {CANCEL_UNFILLED}
+    cancel_legs = {a.leg for a in result.actions if a.kind == CANCEL_UNFILLED}
+    assert cancel_legs == {"Y", "X"}
+
+
+def test_timeout_after_deadline_with_exposure_flattens():
+    result = on_timeout(_partially_filled(), now=100.1)
+    assert result.state.phase is ExecutionPhase.FLATTENING
+    assert result.reasons == ()
+    kinds = {a.kind for a in result.actions}
+    assert CANCEL_UNFILLED in kinds
+    assert FLATTEN_FILLED in kinds
+    flatten = [a for a in result.actions if a.kind == FLATTEN_FILLED]
+    assert flatten == [ActionIntent(FLATTEN_FILLED, leg="Y", quantity=Decimal("10"))]
+    assert result.state.timeouts == 1
+
+
+def test_order_failure_rolls_back_like_timeout():
+    no_exposure = on_order_failure(_entered(), leg="Y")
+    assert no_exposure.state.phase is ExecutionPhase.IDLE
+    assert no_exposure.state.rollbacks == 1
+    with_exposure = on_order_failure(_partially_filled(), leg="X")
+    assert with_exposure.state.phase is ExecutionPhase.FLATTENING
+    assert any(a.kind == FLATTEN_FILLED for a in with_exposure.actions)
+
+
+def test_timeout_inactive_phase_is_not_applicable():
+    result = on_timeout(ExecutionState(), now=1.0)
+    assert result.reasons == ("TIMEOUT_NOT_APPLICABLE",)
