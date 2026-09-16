@@ -339,3 +339,93 @@ def test_confirm_flatten_ignores_duplicate_fill_id():
 def test_confirm_flatten_requires_flattening_phase():
     result = confirm_flatten(ExecutionState(), (), cooldown_deadline=999.0)
     assert result.reasons == ("PHASE_NOT_FLATTENING",)
+
+
+import sngw_trader.indicators.execution_recovery as er
+
+
+def _open_state() -> ExecutionState:
+    result = on_fill(_entered(), FillObservation("Y", "f1", "10", "100", "100"))
+    result = on_fill(result.state, FillObservation("X", "f2", "8", "99", "99"))
+    return result.state
+
+
+def test_matching_reconciliation_enables_entries():
+    result = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("8")},
+        observed_order_ids=frozenset(),
+    )
+    assert result.reasons == ("RECONCILED",)
+    assert [a.kind for a in result.actions] == [er.ENABLE_ENTRIES]
+    assert result.state.recovery_reason is None
+
+
+def test_missing_position_blocks():
+    result = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("0")},
+        observed_order_ids=frozenset(),
+    )
+    assert result.state.phase is ExecutionPhase.BLOCKED
+    assert "MISSING_POSITION_X" in result.reasons
+    assert result.state.recovery_reason == "MISSING_POSITION_X"
+    assert er.ActionIntent(kind=er.BLOCK_ENTRIES) in result.actions
+
+
+def test_quantity_mismatch_blocks():
+    result = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("9"), "X": Decimal("8")},
+        observed_order_ids=frozenset(),
+    )
+    assert "POSITION_MISMATCH_Y" in result.reasons
+
+
+def test_unexpected_position_blocks_with_flatten_intent():
+    result = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("8"), "SOL": Decimal("5")},
+        observed_order_ids=frozenset(),
+    )
+    assert "UNEXPECTED_POSITION_SOL" in result.reasons
+    assert er.ActionIntent(kind=er.FLATTEN_FILLED, leg="SOL", quantity=Decimal("5")) in result.actions
+
+
+def test_pending_order_mismatch_blocks_with_cancel():
+    result = er.reconcile(
+        ExecutionState(),
+        observed_positions={},
+        observed_order_ids=frozenset({"stale-1"}),
+    )
+    assert "PENDING_ORDER_MISMATCH" in result.reasons
+
+
+def test_blocked_state_refuses_new_entry_until_recovery():
+    blocked = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("0")},
+        observed_order_ids=frozenset(),
+    ).state
+    refused = begin_entry(blocked, "10", "8", "o-y", "o-x", deadline=100.0, entry_beta=1.0)
+    assert refused.reasons == ("ENTRIES_BLOCKED",)
+    recovered = er.reconcile(
+        blocked,
+        observed_positions={"Y": Decimal("10"), "X": Decimal("8")},
+        observed_order_ids=frozenset(),
+    )
+    assert recovered.reasons == ("RECONCILED",)
+    allowed = begin_entry(recovered.state, "10", "8", "o-y", "o-x", deadline=100.0, entry_beta=1.0)
+    assert allowed.reasons == ()
+
+
+def test_reconcile_uses_exit_remaining_as_expected_position():
+    opened = _open_state()
+    exiting = begin_exit(opened, "e-y", "e-x", deadline=150.0)
+    partial_exit = on_fill(exiting.state, FillObservation("Y", "f3", "10", "100", "100"))
+    result = er.reconcile(
+        partial_exit.state,
+        observed_positions={"Y": Decimal("0"), "X": Decimal("8")},
+        observed_order_ids=frozenset({"e-y", "e-x"}),
+    )
+    assert result.reasons == ("RECONCILED",)

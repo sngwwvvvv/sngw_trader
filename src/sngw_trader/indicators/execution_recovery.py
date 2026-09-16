@@ -263,10 +263,10 @@ def begin_exit(
     x_order_id: str,
     deadline: float,
 ) -> TransitionResult:
+    if state.recovery_reason is not None or state.phase is ExecutionPhase.BLOCKED:
+        return TransitionResult(state, reasons=("ENTRIES_BLOCKED",))
     if state.phase is not ExecutionPhase.OPEN:
         return TransitionResult(state, reasons=("PHASE_NOT_OPEN",))
-    if state.recovery_reason is not None:
-        return TransitionResult(state, reasons=("ENTRIES_BLOCKED",))
     if not y_order_id or not x_order_id:
         return TransitionResult(state, reasons=("MISSING_ORDER_ID",))
     if not _finite_value(deadline):
@@ -436,3 +436,53 @@ def confirm_flatten(
         cooldown_deadline=cooldown_deadline,
     )
     return TransitionResult(new_state)
+
+
+def reconcile(
+    state: ExecutionState,
+    observed_positions: Mapping[str, Decimal],
+    observed_order_ids: frozenset[str] = frozenset(),
+) -> TransitionResult:
+    reasons: list[str] = []
+    actions: list[ActionIntent] = []
+    for name in ("Y", "X"):
+        leg = state.legs.get(name)
+        if leg is None:
+            continue
+        expected = _leg_held(state, leg)
+        observed = observed_positions.get(name)
+        if observed is None:
+            if expected > 0:
+                reasons.append(f"MISSING_POSITION_{name}")
+            continue
+        observed_qty = _decimal(f"observed[{name}]", observed)
+        if observed_qty == expected:
+            continue
+        if expected == 0 and observed_qty > 0:
+            reasons.append(f"UNEXPECTED_POSITION_{name}")
+            actions.append(ActionIntent(FLATTEN_FILLED, leg=name, quantity=observed_qty))
+        elif expected > 0 and observed_qty == 0:
+            reasons.append(f"MISSING_POSITION_{name}")
+        else:
+            reasons.append(f"POSITION_MISMATCH_{name}")
+    for name, value in observed_positions.items():
+        if name in state.legs:
+            continue
+        observed_qty = _decimal(f"observed[{name}]", value)
+        if observed_qty != 0:
+            reasons.append(f"UNEXPECTED_POSITION_{name}")
+            actions.append(ActionIntent(FLATTEN_FILLED, leg=name, quantity=observed_qty))
+    if state.pending_order_ids != frozenset(observed_order_ids):
+        reasons.append("PENDING_ORDER_MISMATCH")
+        for order_id in state.pending_order_ids - frozenset(observed_order_ids):
+            actions.append(ActionIntent(CANCEL_UNFILLED, client_order_id=order_id))
+    if reasons:
+        blocked = replace(state, phase=ExecutionPhase.BLOCKED, recovery_reason=reasons[0])
+        return TransitionResult(
+            blocked,
+            tuple(actions) + (ActionIntent(BLOCK_ENTRIES),),
+            tuple(reasons),
+        )
+    enabled_phase = ExecutionPhase.IDLE if state.phase is ExecutionPhase.BLOCKED else state.phase
+    enabled = replace(state, phase=enabled_phase, recovery_reason=None)
+    return TransitionResult(enabled, (ActionIntent(ENABLE_ENTRIES),), ("RECONCILED",))
