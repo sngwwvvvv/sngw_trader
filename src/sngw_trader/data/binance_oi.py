@@ -70,19 +70,28 @@ def fetch_metrics_day(day: date, timeout: int = 60) -> str | None:
 def scan_binance_oi(
     start: date, end: date, fetch=fetch_metrics_day
 ) -> tuple[list[OpenInterestPoint], date | None]:
-    """Days oldest->newest, stop at the first non-5m day. -> (points, era_end)."""
+    """Days oldest->newest; non-5m (corrupt) days are skipped, 5m may resume later.
+
+    -> (points, era_end) where era_end is the day after the last 5m day
+    if any non-5m day was seen, else None.
+    """
     points: dict[int, OpenInterestPoint] = {}
+    last_5m_day: date | None = None
+    saw_non_5m = False
     day = start
     while day <= end:
         text = fetch(day)
         if text is not None:
             day_points, interval = parse_metrics_csv(text)
             if interval != "5m":
-                return [points[ts] for ts in sorted(points)], day
-            for point in day_points:
-                points[point.ts_event] = point
+                saw_non_5m = True
+            else:
+                for point in day_points:
+                    points[point.ts_event] = point
+                last_5m_day = day
         day += timedelta(days=1)
-    return [points[ts] for ts in sorted(points)], None
+    era_end = last_5m_day + timedelta(days=1) if saw_non_5m and last_5m_day else None
+    return [points[ts] for ts in sorted(points)], era_end
 
 
 def write_binance_oi(settings, points: list[OpenInterestPoint]) -> None:

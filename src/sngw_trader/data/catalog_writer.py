@@ -204,3 +204,7 @@ def main() -> None:
 
 def _fmt(ns: int) -> str:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).isoformat()
+
+
+if __name__ == "__main__":
+    main()

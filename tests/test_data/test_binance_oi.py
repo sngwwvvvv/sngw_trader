@@ -17,6 +17,14 @@ def _five_minute_csv(day: str = "2023-06-01") -> str:
     )
 
 
+def _coarse_csv(day: str) -> str:
+    return _csv(
+        f"{day} 00:00:00,BTCUSDT,1.0,1.0",
+        f"{day} 00:25:00,BTCUSDT,1.1,1.1",
+        f"{day} 00:50:00,BTCUSDT,1.2,1.2",
+    )
+
+
 def test_parse_metrics_csv_returns_five_minute_points() -> None:
     points, interval = parse_metrics_csv(_five_minute_csv())
     assert interval == "5m"
@@ -44,6 +52,19 @@ def test_parse_metrics_csv_rejects_coarser_interval() -> None:
 def test_parse_metrics_csv_unknown_on_short_input() -> None:
     assert parse_metrics_csv("create_time,symbol\n") == ([], "unknown")
     assert parse_metrics_csv("") == ([], "unknown")
+
+
+def test_scan_skips_corrupt_days_and_resumes_5m() -> None:
+    days = {
+        date(2023, 6, 1): _five_minute_csv("2023-06-01"),
+        date(2023, 6, 2): _coarse_csv("2023-06-02"),
+        date(2023, 6, 3): _five_minute_csv("2023-06-03"),
+        date(2023, 6, 4): _five_minute_csv("2023-06-04"),
+    }
+    points, era_end = scan_binance_oi(date(2023, 6, 1), date(2023, 6, 5), fetch=days.get)
+    assert era_end == date(2023, 6, 5)
+    assert len(points) == 9
+    assert [p.ts_event for p in points] == sorted(p.ts_event for p in points)
 
 
 def test_scan_stops_at_era_end_and_dedupes() -> None:
