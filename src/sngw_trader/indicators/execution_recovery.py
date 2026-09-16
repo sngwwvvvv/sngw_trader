@@ -1,5 +1,8 @@
 # src/sngw_trader/indicators/execution_recovery.py
-"""Pure two-leg execution state transitions, reconciliation, and restart gating."""
+"""Pure two-leg execution state transitions, reconciliation, and restart gating.
+
+``cooldown_deadline`` is recorded by ``confirm_flatten``; enforcing the cooldown is the caller's responsibility (S06 adapter).
+"""
 
 from __future__ import annotations
 
@@ -477,13 +480,17 @@ def reconcile(
         for order_id in state.pending_order_ids - frozenset(observed_order_ids):
             actions.append(ActionIntent(CANCEL_UNFILLED, client_order_id=order_id))
     if reasons:
-        blocked = replace(state, phase=ExecutionPhase.BLOCKED, recovery_reason=reasons[0])
+        failed_phase = state.phase if state.phase is ExecutionPhase.FLATTENING else ExecutionPhase.BLOCKED
+        blocked = replace(state, phase=failed_phase, recovery_reason=reasons[0])
         return TransitionResult(
             blocked,
             tuple(actions) + (ActionIntent(BLOCK_ENTRIES),),
             tuple(reasons),
         )
-    enabled_phase = ExecutionPhase.IDLE if state.phase is ExecutionPhase.BLOCKED else state.phase
+    if state.phase is ExecutionPhase.BLOCKED:
+        enabled_phase = ExecutionPhase.OPEN if state.exposure > 0 else ExecutionPhase.IDLE
+    else:
+        enabled_phase = state.phase
     enabled = replace(state, phase=enabled_phase, recovery_reason=None)
     return TransitionResult(enabled, (ActionIntent(ENABLE_ENTRIES),), ("RECONCILED",))
 
@@ -538,7 +545,7 @@ def restore_state(data: Mapping[str, Any]) -> ExecutionState:
         kalman = data["kalman"]
         max_slippage_bps = _decimal("max_slippage_bps", data["max_slippage_bps"])
         fill_ids = frozenset(data["fill_ids"])
-    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError, InvalidOperation) as exc:
         raise ValueError(f"invalid persisted state: {exc}") from exc
     return ExecutionState(
         phase=phase,

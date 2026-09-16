@@ -415,8 +415,63 @@ def test_blocked_state_refuses_new_entry_until_recovery():
         observed_order_ids=frozenset(),
     )
     assert recovered.reasons == ("RECONCILED",)
-    allowed = begin_entry(recovered.state, "10", "8", "o-y", "o-x", deadline=100.0, entry_beta=1.0)
-    assert allowed.reasons == ()
+    assert recovered.state.phase is ExecutionPhase.OPEN
+    refused_after = begin_entry(recovered.state, "10", "8", "o-y", "o-x", deadline=100.0, entry_beta=1.0)
+    assert refused_after.reasons == ("PHASE_NOT_IDLE",)
+
+
+def test_reconcile_recovery_with_exposure_restores_open():
+    blocked = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("0")},
+        observed_order_ids=frozenset(),
+    ).state
+    assert blocked.phase is ExecutionPhase.BLOCKED
+    assert blocked.exposure == Decimal("18")
+    recovered = er.reconcile(
+        blocked,
+        observed_positions={"Y": Decimal("10"), "X": Decimal("8")},
+        observed_order_ids=frozenset(),
+    )
+    assert recovered.reasons == ("RECONCILED",)
+    assert [a.kind for a in recovered.actions] == [er.ENABLE_ENTRIES]
+    assert recovered.state.phase is ExecutionPhase.OPEN
+    assert recovered.state.exposure == Decimal("18")
+    assert recovered.state.recovery_reason is None
+    exiting = begin_exit(recovered.state, "e-y", "e-x", deadline=150.0)
+    assert exiting.state.phase is ExecutionPhase.EXIT_PENDING
+    refused = begin_entry(recovered.state, "10", "8", "o-y", "o-x", deadline=100.0, entry_beta=1.0)
+    assert refused.reasons == ("PHASE_NOT_IDLE",)
+
+
+def test_reconcile_failure_keeps_flattening():
+    failed = er.reconcile(
+        _flattening(),
+        observed_positions={"Y": Decimal("0"), "X": Decimal("0")},
+        observed_order_ids=frozenset(),
+    )
+    assert failed.state.phase is ExecutionPhase.FLATTENING
+    assert failed.state.recovery_reason is not None
+    assert "MISSING_POSITION_Y" in failed.reasons
+    assert er.ActionIntent(kind=er.BLOCK_ENTRIES) in failed.actions
+    completed = confirm_flatten(
+        failed.state,
+        (FillObservation("Y", "g1", "10", "100", "100"),),
+        cooldown_deadline=999.0,
+    )
+    assert completed.state.phase is ExecutionPhase.CLOSED
+    assert completed.state.exposure == Decimal("0")
+
+
+def test_reconcile_cancels_stale_pending_orders():
+    result = er.reconcile(
+        _entered(),
+        observed_positions={},
+        observed_order_ids=frozenset(),
+    )
+    assert "PENDING_ORDER_MISMATCH" in result.reasons
+    assert er.ActionIntent(kind=er.CANCEL_UNFILLED, client_order_id="o-y") in result.actions
+    assert er.ActionIntent(kind=er.CANCEL_UNFILLED, client_order_id="o-x") in result.actions
 
 
 def test_reconcile_uses_exit_remaining_as_expected_position():
@@ -483,5 +538,12 @@ def test_restore_rejects_malformed_decimal():
 def test_restore_rejects_missing_key():
     data = persist_state(ExecutionState())
     del data["phase"]
+    with pytest.raises(ValueError):
+        restore_state(data)
+
+
+def test_restore_rejects_non_mapping_legs():
+    data = persist_state(ExecutionState())
+    data["legs"] = []
     with pytest.raises(ValueError):
         restore_state(data)
