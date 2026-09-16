@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
 
@@ -108,6 +110,8 @@ def test_err_mom_defaults():
     assert s.size_half_life == 20
     assert s.size_rebalance_band == 0.10
     assert s.trade_size == "0.01"
+    assert s.oi_enabled is False
+    assert s.oi_period == "5m"
 
 
 def test_bad_sizing_mode_exits(monkeypatch):
@@ -115,6 +119,12 @@ def test_bad_sizing_mode_exits(monkeypatch):
 
     monkeypatch.setenv("SIZING_MODE", "nope")
     with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_non_5m_oi_period_exits(monkeypatch):
+    monkeypatch.setenv("OI_PERIOD", "15m")
+    with pytest.raises(SystemExit, match="OI_PERIOD.*5m"):
         load_settings()
 
 

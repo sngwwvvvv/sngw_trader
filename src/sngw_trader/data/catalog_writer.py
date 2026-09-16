@@ -19,6 +19,13 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from sngw_trader.config import Settings, load_settings
+from sngw_trader.data.open_interest import (
+    OI_INSTRUMENT_ID,
+    OpenInterestPoint,
+    download_open_interest,
+    register_open_interest,
+    wrap_open_interest,
+)
 
 _HISTORY_URL = "https://www.okx.com/api/v5/market/history-candles"
 
@@ -151,6 +158,11 @@ def run_download(settings: Settings, catalog: ParquetDataCatalog) -> None:
 
         download_and_write(settings, catalog)
         return
+    if settings.oi_enabled and settings.instrument_id_str != OI_INSTRUMENT_ID:
+        raise SystemExit(
+            f"OI catalog download supports only {OI_INSTRUMENT_ID}, "
+            f"got {settings.instrument_id_str}"
+        )
     instrument = load_instrument(settings)
     catalog.write_data([instrument], data_cls=Instrument)
     bars = download_bars(settings, instrument)
@@ -163,6 +175,24 @@ def run_download(settings: Settings, catalog: ParquetDataCatalog) -> None:
         f"Wrote {len(bars)} bars for {settings.instrument_id_str} "
         f"({_fmt(first)} -> {_fmt(last)}) to {settings.catalog_path}"
     )
+    if settings.oi_enabled:
+        points = download_open_interest(settings, settings.instrument_id_str)
+        if not points:
+            raise SystemExit(
+                f"No open interest downloaded for {settings.instrument_id_str} "
+                f"from {settings.catalog_start} to {settings.catalog_end}"
+            )
+        register_open_interest()
+        catalog.write_data(
+            [wrap_open_interest(point) for point in points],
+            data_cls=OpenInterestPoint,
+        )
+        first_oi = min(point.ts_event for point in points)
+        last_oi = max(point.ts_event for point in points)
+        print(
+            f"Wrote {len(points)} open-interest points for {settings.instrument_id_str} "
+            f"({_fmt(first_oi)} -> {_fmt(last_oi)}) to {settings.catalog_path}"
+        )
 
 
 def main() -> None:
