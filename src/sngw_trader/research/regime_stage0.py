@@ -129,7 +129,7 @@ def stage0_pass(
     if not table["r4_cyc_p5"] < table["r1_cyc_p5"]:
         reasons.append("R4: cyc p5 not worse than R1 cyc p5")
     if not table["r4_cyc_20"] < table["r4_spy_20"]:
-        reasons.append("R4: cyc 20d fwd mean >= spy")
+        reasons.append("R4: cyc 20d fwd mean not < spy")
     if table["duration_median_r1_r4"] < MIN_DURATION_MEDIAN:
         reasons.append(f"R1-R4 duration median < {MIN_DURATION_MEDIAN}")
     for r in ("r1", "r4"):
@@ -259,26 +259,34 @@ def rescored_codes(snapshots: list, median_window: int) -> dict[str, int]:
     window-independent, so only the z median window changes; invalid-quality
     and NaN-z sessions stay R0 (same rules as build_snapshots).
 
-    Snapshots omit the warmup segment (first IQR_LONG-1 aligned sessions), so
-    z at emitted index j is exact only once the long IQR window lies entirely
-    inside the stored series (j >= IQR_LONG-1); earlier sessions are labeled
-    R0 (not exactly rescorable) instead of silently biased.
+    build_snapshots omits warmup sessions (first IQR_LONG-1 aligned sessions)
+    only when they are valid; warmup-invalid sessions are emitted as R0 rows.
+    Invalid rows are therefore excluded from the z series here, so the
+    remaining valid rows start at the first post-warmup session and z at valid
+    index j is exact only once the long IQR window lies entirely inside the
+    valid series (j >= IQR_LONG-1); earlier sessions are labeled R0 (not
+    exactly rescorable) instead of silently biased. Invalid sessions still
+    emit R0, keyed by session_date.
     """
     snaps = sorted(snapshots, key=lambda s: s.session_date)
+    valid = [s for s in snaps if s.quality_code != QUALITY_INVALID]
 
-    def col(getter) -> np.ndarray:
-        return np.asarray([float(getter(s)) for s in snaps], dtype=float)
+    def z(getter) -> np.ndarray:
+        vals = np.asarray([float(getter(s)) for s in valid], dtype=float)
+        return robust_z(vals, median_window=median_window)
 
-    oas_z = robust_z(col(lambda s: s.oas), median_window=median_window)
-    vix_vxv_z = robust_z(col(lambda s: s.vix_vxv), median_window=median_window)
-    growth_z = robust_z(col(lambda s: s.copper_gold), median_window=median_window)
+    oas_z = z(lambda s: s.oas)
+    vix_vxv_z = z(lambda s: s.vix_vxv)
+    growth_z = z(lambda s: s.copper_gold)
     labels = label_series(stress_score(oas_z, vix_vxv_z), growth_z)
     codes: dict[str, int] = {}
-    for j, (s, lab) in enumerate(zip(snaps, labels)):
-        if s.quality_code == QUALITY_INVALID or lab == -1 or j < IQR_LONG - 1:
+    for j, (s, lab) in enumerate(zip(valid, labels)):
+        codes[s.session_date] = (
+            R0 if lab == -1 or j < IQR_LONG - 1 else int(lab)
+        )
+    for s in snaps:
+        if s.quality_code == QUALITY_INVALID:
             codes[s.session_date] = R0
-        else:
-            codes[s.session_date] = int(lab)
     return codes
 
 
