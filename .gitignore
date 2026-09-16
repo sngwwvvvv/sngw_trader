@@ -17,3 +17,4 @@ logs/**
 *.feather
 *.parquet
 .DS_Store
+.superpowers/
