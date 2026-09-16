@@ -311,6 +311,7 @@ def on_fill(state: ExecutionState, fill: FillObservation) -> TransitionResult:
         return TransitionResult(state, reasons=("MISSING_LEG",))
     if fill.fill_id in state.fill_ids:
         return TransitionResult(state, reasons=("DUPLICATE_FILL",))
+    slippage_bps = abs(fill.fill_price - fill.reference_price) / fill.reference_price * Decimal("10000")
     target = leg_state.target_quantity or Decimal("0")
     filled = leg_state.filled_quantity + fill.quantity
     if filled > target:
@@ -335,6 +336,9 @@ def on_fill(state: ExecutionState, fill: FillObservation) -> TransitionResult:
         pending_order_ids=frozenset() if all_filled else state.pending_order_ids,
         deadline=None if all_filled else state.deadline,
     )
+    if slippage_bps > state.max_slippage_bps:
+        result = _rollback(new_state, "slippage_rejections")
+        return TransitionResult(result.state, result.actions, ("SLIPPAGE_EXCEEDED",))
     return TransitionResult(new_state)
 
 

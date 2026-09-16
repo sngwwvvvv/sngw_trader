@@ -251,3 +251,28 @@ def test_order_failure_rolls_back_like_timeout():
 def test_timeout_inactive_phase_is_not_applicable():
     result = on_timeout(ExecutionState(), now=1.0)
     assert result.reasons == ("TIMEOUT_NOT_APPLICABLE",)
+
+
+def test_fill_within_slippage_limit_passes():
+    result = on_fill(_entered(), FillObservation("Y", "f1", "4", "100.4", "100"))
+    assert result.reasons == ()
+    assert result.state.phase is ExecutionPhase.ENTRY_PARTIAL
+
+
+def test_fill_beyond_slippage_limit_flattens():
+    result = on_fill(_entered(), FillObservation("Y", "f1", "4", "100.6", "100"))
+    assert result.reasons == ("SLIPPAGE_EXCEEDED",)
+    assert result.state.phase is ExecutionPhase.FLATTENING
+    assert result.state.slippage_rejections == 1
+    assert ActionIntent(FLATTEN_FILLED, leg="Y", quantity=Decimal("4")) in result.actions
+
+
+def test_slippage_uses_default_limit_of_50_bps():
+    assert on_fill(_entered(), FillObservation("Y", "f1", "1", "100.4", "100")).reasons == ()
+    assert on_fill(_entered(), FillObservation("Y", "f2", "1", "100.6", "100")).reasons == ("SLIPPAGE_EXCEEDED",)
+
+
+def test_slippage_rejection_with_strict_limit():
+    strict = _entered(max_slippage_bps=Decimal("10"))
+    result = on_fill(strict, FillObservation("Y", "f1", "4", "100.3", "100"))
+    assert result.reasons == ("SLIPPAGE_EXCEEDED",)
