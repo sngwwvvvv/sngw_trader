@@ -429,3 +429,59 @@ def test_reconcile_uses_exit_remaining_as_expected_position():
         observed_order_ids=frozenset({"e-y", "e-x"}),
     )
     assert result.reasons == ("RECONCILED",)
+
+
+from dataclasses import replace
+
+from sngw_trader.indicators.execution_recovery import persist_state, restore_state
+
+
+def test_persist_restore_round_trip():
+    state = _open_state()
+    state = replace(state, kalman={"alpha": 0.5, "beta": 1.25}, entry_beta=1.25)
+    restored = restore_state(persist_state(state))
+    assert restored == state
+
+
+def test_round_trip_through_blocked_state():
+    blocked = er.reconcile(
+        _open_state(),
+        observed_positions={"Y": Decimal("10"), "X": Decimal("0")},
+        observed_order_ids=frozenset(),
+    ).state
+    assert restore_state(persist_state(blocked)) == blocked
+
+
+def test_restore_rejects_unknown_phase():
+    data = persist_state(ExecutionState())
+    data["phase"] = "NOPE"
+    with pytest.raises(ValueError):
+        restore_state(data)
+
+
+def test_restore_rejects_negative_counter():
+    data = persist_state(ExecutionState())
+    data["timeouts"] = -1
+    with pytest.raises(ValueError):
+        restore_state(data)
+
+
+def test_restore_rejects_nonfinite_float():
+    data = persist_state(ExecutionState())
+    data["deadline"] = float("inf")
+    with pytest.raises(ValueError):
+        restore_state(data)
+
+
+def test_restore_rejects_malformed_decimal():
+    data = persist_state(_entered())
+    data["legs"]["Y"]["target_quantity"] = "not-a-number"
+    with pytest.raises(ValueError):
+        restore_state(data)
+
+
+def test_restore_rejects_missing_key():
+    data = persist_state(ExecutionState())
+    del data["phase"]
+    with pytest.raises(ValueError):
+        restore_state(data)

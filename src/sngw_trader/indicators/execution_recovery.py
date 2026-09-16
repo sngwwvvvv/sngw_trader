@@ -486,3 +486,70 @@ def reconcile(
     enabled_phase = ExecutionPhase.IDLE if state.phase is ExecutionPhase.BLOCKED else state.phase
     enabled = replace(state, phase=enabled_phase, recovery_reason=None)
     return TransitionResult(enabled, (ActionIntent(ENABLE_ENTRIES),), ("RECONCILED",))
+
+
+def persist_state(state: ExecutionState) -> dict[str, Any]:
+    return {
+        "phase": state.phase.value,
+        "legs": {
+            name: {
+                "leg": leg.leg,
+                "target_quantity": None if leg.target_quantity is None else str(leg.target_quantity),
+                "filled_quantity": str(leg.filled_quantity),
+                "client_order_id": leg.client_order_id,
+                "status": leg.status.value,
+            }
+            for name, leg in state.legs.items()
+        },
+        "pending_order_ids": sorted(state.pending_order_ids),
+        "deadline": state.deadline,
+        "entry_beta": state.entry_beta,
+        "cooldown_deadline": state.cooldown_deadline,
+        "entries_started": state.entries_started,
+        "exits_started": state.exits_started,
+        "timeouts": state.timeouts,
+        "rollbacks": state.rollbacks,
+        "slippage_rejections": state.slippage_rejections,
+        "recovery_reason": state.recovery_reason,
+        "kalman": None if state.kalman is None else dict(state.kalman),
+        "max_slippage_bps": str(state.max_slippage_bps),
+        "fill_ids": sorted(state.fill_ids),
+    }
+
+
+def restore_state(data: Mapping[str, Any]) -> ExecutionState:
+    try:
+        phase = ExecutionPhase(data["phase"])
+        legs = {}
+        for name, item in data["legs"].items():
+            legs[name] = LegState(
+                leg=item["leg"],
+                target_quantity=None if item["target_quantity"] is None else _decimal("target_quantity", item["target_quantity"]),
+                filled_quantity=_decimal("filled_quantity", item["filled_quantity"]),
+                client_order_id=item["client_order_id"],
+                status=LegStatus(item["status"]),
+            )
+        pending = frozenset(data["pending_order_ids"])
+        deadline = data["deadline"]
+        entry_beta = data["entry_beta"]
+        cooldown = data["cooldown_deadline"]
+        counters = {key: data[key] for key in ("entries_started", "exits_started", "timeouts", "rollbacks", "slippage_rejections")}
+        recovery_reason = data["recovery_reason"]
+        kalman = data["kalman"]
+        max_slippage_bps = _decimal("max_slippage_bps", data["max_slippage_bps"])
+        fill_ids = frozenset(data["fill_ids"])
+    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+        raise ValueError(f"invalid persisted state: {exc}") from exc
+    return ExecutionState(
+        phase=phase,
+        legs=legs,
+        pending_order_ids=pending,
+        deadline=deadline,
+        entry_beta=entry_beta,
+        cooldown_deadline=cooldown,
+        **counters,
+        recovery_reason=recovery_reason,
+        kalman=kalman,
+        max_slippage_bps=max_slippage_bps,
+        fill_ids=fill_ids,
+    )
