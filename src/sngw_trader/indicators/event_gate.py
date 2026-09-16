@@ -91,3 +91,41 @@ class GateDecision:
             raise ValueError("entries_allowed with reasons is contradictory")
         if not self.entries_allowed and not self.reasons:
             raise ValueError("blocked decision requires a reason")
+
+
+def _add_reason(reasons: list[str], reason: str) -> None:
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def evaluate_gate(
+    events: Sequence[EventRecord],
+    symbol: str,
+    now: float,
+    last_event_check: float,
+    limits: GateLimits,
+) -> GateDecision:
+    if (
+        not symbol
+        or not _finite_value(now)
+        or not _finite_value(last_event_check)
+        or last_event_check > now
+    ):
+        return GateDecision(False, ("INVALID_INPUT",), EXIT_NONE)
+    reasons: list[str] = []
+    if not events:
+        _add_reason(reasons, "MISSING_EVENT_STATE")
+    if now - last_event_check > limits.max_event_age_seconds:
+        _add_reason(reasons, "STALE_EVENT_STATE")
+    for event in sorted(events, key=lambda e: e.event_id):
+        if event.symbol is not None and event.symbol != symbol:
+            continue
+        if now < event.effective_at:
+            continue
+        if event.expires_at is not None and now > event.expires_at:
+            continue
+        if event.source_status == SOURCE_DISPUTED:
+            _add_reason(reasons, "SOURCE_DISPUTED")
+            continue
+        _add_reason(reasons, f"EVENT_ACTIVE_{event.event_type.value}")
+    return GateDecision(not reasons, tuple(reasons), EXIT_NONE)
