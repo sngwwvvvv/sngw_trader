@@ -8,12 +8,18 @@ from datetime import datetime, timedelta
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.core.datetime import dt_to_unix_nanos
 from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.trading.config import ImportableStrategyConfig, StrategyFactory
 
 from sngw_trader.config.settings import Settings
 from sngw_trader.data.funding import parse_fills
 from sngw_trader.research.config import GridSpec
 from sngw_trader.runners.backtest_okx import build_run_config, default_bar_type
+from sngw_trader.runners.backtest_oi import (
+    attach_oi_data,
+    build_oi_run_config,
+    oi_bar_type,
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,20 @@ def extract_fills(fills_df, window_start_ns: int) -> list[tuple[int, float, floa
     return [f for f in fills if f[0] >= window_start_ns]
 
 
+def _collect_result(engine, start: datetime) -> RunResult:
+    window_start_ns = dt_to_unix_nanos(start)
+    result = extract_run_result(
+        engine.cache.positions() + engine.cache.position_snapshots(),
+        window_start_ns,
+    )
+    marks = extract_analyzer_equity_marks(
+        engine.portfolio.analyzer, 10_000.0, window_start_ns
+    )
+    fills_df = engine.trader.generate_order_fills_report()
+    fills = extract_fills(fills_df, window_start_ns)
+    return replace(result, equity_marks=marks, fills=fills)
+
+
 def run_window(
     catalog_path: str,
     instrument_id: str,
@@ -128,16 +148,45 @@ def run_window(
     engine.add_strategy(build_strategy(spec, params, instrument_id, bar_type))
     try:
         node.run()
-        window_start_ns = dt_to_unix_nanos(start)
-        result = extract_run_result(
-            engine.cache.positions() + engine.cache.position_snapshots(),
-            window_start_ns,
+        return _collect_result(engine, start)
+    finally:
+        node.dispose()
+
+
+def run_oi_window(
+    catalog_path: str,
+    instrument_id: str,
+    settings: Settings,
+    spec: GridSpec,
+    params: dict[str, object],
+    start: datetime,
+    end: datetime,
+    warmup_days: int = 1,
+    quiet: bool = True,
+):
+    """One OI backtest window: OKX 1m bars + custom OI points, BacktestNode runner."""
+    run_config = build_oi_run_config(
+        settings,
+        start=start - timedelta(days=warmup_days),
+        end=end,
+    )
+    node = BacktestNode(configs=[run_config])
+    node.build()
+    engine = node.get_engine(run_config.id)
+    if engine is None:
+        raise RuntimeError(f"Engine not built for run config {run_config.id}")
+    engine.add_strategy(
+        build_strategy(spec, params, instrument_id, str(oi_bar_type(instrument_id)))
+    )
+    try:
+        attach_oi_data(
+            engine,
+            ParquetDataCatalog(catalog_path),
+            instrument_id,
+            dt_to_unix_nanos(start - timedelta(days=warmup_days)),
+            dt_to_unix_nanos(end),
         )
-        marks = extract_analyzer_equity_marks(
-            engine.portfolio.analyzer, 10_000.0, window_start_ns
-        )
-        fills_df = engine.trader.generate_order_fills_report()
-        fills = extract_fills(fills_df, window_start_ns)
-        return replace(result, equity_marks=marks, fills=fills)
+        node.run()
+        return _collect_result(engine, start)
     finally:
         node.dispose()

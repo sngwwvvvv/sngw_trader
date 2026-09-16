@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -144,3 +145,75 @@ def test_extract_fills_empty():
 def test_run_result_default_fills():
     r = RunResult([1.0], [0.01], 1, 1.0)
     assert r.fills == []
+
+
+def test_run_oi_window_wires_oi_strategy_and_data(monkeypatch, tmp_path):
+    """run_oi_window가 composite bar_type 전략을 붙이고 OI 데이터를 attach하는지 확인."""
+    import sngw_trader.research.executor as ex
+    from sngw_trader.strategies.oi_crowding_mean_reversion import OiCrowdingMeanReversion
+
+    OI_SPEC = GridSpec(
+        strategy_path="sngw_trader.strategies.oi_crowding_mean_reversion:OiCrowdingMeanReversion",
+        config_path="sngw_trader.strategies.oi_crowding_mean_reversion:OiCrowdingMeanReversionConfig",
+        fixed={"trade_size": "0.01", "oi_client_id": "BACKTEST"},
+        grid={},
+    )
+
+    attached = {}
+
+    def fake_attach(engine, catalog, instrument_id, start_ns, end_ns):
+        attached["args"] = (instrument_id, start_ns, end_ns)
+
+    captured = {}
+
+    class FakeEngine:
+        def __init__(self):
+            self.cache = SimpleNamespace(positions=lambda: [], position_snapshots=lambda: [])
+            self.portfolio = SimpleNamespace(
+                analyzer=SimpleNamespace(portfolio_returns=lambda: None)
+            )
+            self.trader = SimpleNamespace(
+                generate_order_fills_report=lambda: None
+            )
+
+        def add_strategy(self, strategy):
+            captured["strategy"] = strategy
+
+    class FakeNode:
+        def __init__(self, configs):
+            captured["configs"] = configs
+
+        def build(self):
+            pass
+
+        def get_engine(self, run_id):
+            return FakeEngine()
+
+        def run(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(ex, "BacktestNode", FakeNode)
+    monkeypatch.setattr(ex, "attach_oi_data", fake_attach)
+    monkeypatch.setattr(
+        ex, "build_oi_run_config",
+        lambda settings, start, end: SimpleNamespace(id="r1"),
+    )
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    result = ex.run_oi_window(
+        str(tmp_path), "BTC-USDT-SWAP.OKX", settings=SimpleNamespace(),
+        spec=OI_SPEC, params={}, start=start,
+        end=datetime(2026, 2, 1, tzinfo=timezone.utc), warmup_days=1,
+    )
+
+    assert result.n_trades == 0  # 빈 엔진에서 빈 결과
+    assert type(captured["strategy"]).__name__ == "OiCrowdingMeanReversion"
+    assert str(captured["strategy"].config.bar_type) == (
+        "BTC-USDT-SWAP.OKX-5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+    )
+    instrument_id, start_ns, end_ns = attached["args"]
+    assert instrument_id == "BTC-USDT-SWAP.OKX"
+    assert start_ns == int(start.timestamp() * 1_000_000_000) - 86_400_000_000_000
