@@ -4,6 +4,9 @@
 ``cooldown_deadline`` from S05 is unrelated here; this module is stateless.
 ``cooldown_deadline`` enforcement lives in S05's callers; this module owns no
 state at all — every evaluation takes its timestamps as arguments.
+
+An ``INVALID_INPUT`` decision carries no event reasons (short-circuit);
+adapter authors must treat it as fail-closed with no exit action.
 """
 
 from __future__ import annotations
@@ -105,6 +108,7 @@ def evaluate_gate(
     last_event_check: float,
     limits: GateLimits,
 ) -> GateDecision:
+    events = tuple(events)
     if (
         not symbol
         or not _finite_value(now)

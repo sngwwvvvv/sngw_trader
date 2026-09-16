@@ -237,3 +237,21 @@ def test_stale_feed_suppresses_exit_action():
 def test_missing_feed_suppresses_exit_action():
     decision = _evaluate(events=())
     assert decision.exit_action == EXIT_NONE
+
+
+def test_empty_iterator_fails_closed():
+    decision = evaluate_gate(iter(()), "BTCUSDT", 150.0, 120.0, GateLimits(60.0))
+    assert decision.entries_allowed is False
+    assert decision.reasons == ("MISSING_EVENT_STATE",)
+    assert decision.exit_action == EXIT_NONE
+
+
+def test_global_manual_kill_routes_emergency():
+    decision = _evaluate(events=(_record(symbol=None, event_type=EventType.MANUAL_KILL),), symbol="ETHUSDT")
+    assert decision.exit_action == EXIT_EMERGENCY
+    assert decision.reasons == ("EVENT_ACTIVE_MANUAL_KILL",)
+
+
+def test_nonfinite_last_event_check_fails_closed():
+    decision = _evaluate(last_event_check=float("inf"))
+    assert decision.reasons == ("INVALID_INPUT",)
