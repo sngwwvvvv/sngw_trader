@@ -69,6 +69,9 @@ class Settings:
     catalog_source: str = "okx"
     etf_symbols: str = "SPY,QQQ,IWM"
     instrument_id: str = ""
+    oi_enabled: bool = False
+    oi_period: str = "5m"
+    oi_strategy: str = "oi_a"
 
     @property
     def is_demo(self) -> bool:
@@ -110,6 +113,13 @@ def _catalog_source() -> str:
             f"CATALOG_SOURCE must be 'okx' or 'yahoo-etf', got {raw!r}"
         )
     return raw
+
+
+def _oi_period() -> str:
+    period = _env("OI_PERIOD", "5m")
+    if period != "5m":
+        raise SystemExit(f"OI_PERIOD must be 5m, got {period!r}")
+    return period
 
 
 def load_settings() -> Settings:
@@ -163,4 +173,7 @@ strategy=_env("STRATEGY", "err_mom_a"),
         catalog_source=_catalog_source(),
         etf_symbols=_env("ETF_SYMBOLS", "SPY,QQQ,IWM"),
         instrument_id=instrument_id,
+        oi_enabled=_env("OI_ENABLED", "false").lower() in {"1", "true", "yes"},
+        oi_period=_oi_period(),
+        oi_strategy=_env("OI_STRATEGY", "oi_a"),
     )

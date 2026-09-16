@@ -34,6 +34,18 @@ cp .env.example .env
 
 기본값은 DEMO다. `CONFIRM_LIVE` 없이 실주문이 나가지 않는다.
 
+## OI 평균회귀 백테스트
+
+```powershell
+$env:CATALOG_START="2026-01-01T00:00:00+00:00"
+$env:CATALOG_END="2026-01-02T00:00:00+00:00"
+$env:OI_ENABLED="true"
+uv run catalog-download
+
+$env:OI_STRATEGY="oi_a"; uv run python -m sngw_trader.runners.backtest_oi
+$env:OI_STRATEGY="oi_b"; uv run python -m sngw_trader.runners.backtest_oi
+```
+
 ## 설치된 Nautilus 심볼 확인
 
 버전마다 factory 이름이 다를 수 있다.
