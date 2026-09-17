@@ -151,6 +151,8 @@ def build_multi_instrument_run_config(
     prob_fill_on_limit: float,
     latency_ms: int = 10,
     starting_balance: str = "10_000 USDT",
+    bar_execution: bool = True,
+    dispose_on_completion: bool = True,
     quiet: bool = True,
 ) -> BacktestRunConfig:
     """OKX venue + one bar-data config per instrument. Assembly only."""
@@ -160,6 +162,10 @@ def build_multi_instrument_run_config(
         account_type=AccountType.MARGIN,
         book_type="L1_MBP",
         starting_balances=[starting_balance],
+        # MARK bars are rejected by the nautilus 1.231 matching engine, so
+        # mark-price feeds must run with bar_execution=False and drive the
+        # book from a separate quote feed.
+        bar_execution=bar_execution,
         fill_model=ImportableFillModelConfig(
             fill_model_path="nautilus_trader.backtest.models:ProbabilisticFillModel",
             config_path="nautilus_trader.backtest.config:FillModelConfig",
@@ -194,7 +200,7 @@ def build_multi_instrument_run_config(
         venues=[venue],
         data=data,
         engine=BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)) if quiet else BacktestEngineConfig(),
-        dispose_on_completion=True,
+        dispose_on_completion=dispose_on_completion,
         raise_exception=True,
     )
 

@@ -61,6 +61,9 @@ def main(argv=None) -> None:
         taker_fee=cfg["taker_fee"] * cfg["cost_multiplier"],
         maker_fee=cfg["maker_fee"] * cfg["cost_multiplier"],
         prob_slippage=cfg["prob_slippage"], prob_fill_on_limit=cfg["prob_fill_on_limit"],
+        # reports are extracted from the trader after run(); a disposed
+        # engine cache yields empty fills.csv
+        dispose_on_completion=False,
     )
     node = BacktestNode(configs=[run_config])
     node.build()

@@ -874,12 +874,13 @@ class KalmanSpreadStrategy(Strategy):
         inst_id = f"{symbol}.OKX"
         spec = self._contract_spec(inst_id)
         precision = abs(spec.lot_sz.as_tuple().exponent)
-        self.order_factory.market(
+        order = self.order_factory.market(
             instrument_id=InstrumentId.from_str(inst_id),
             order_side=OrderSide.BUY if side > 0 else OrderSide.SELL,
             quantity=Quantity(qty, precision),
             client_order_id=ClientOrderId(coid),
         )
+        self.submit_order(order)
         self._coid_legs[coid] = (rt.spec.pair_id, leg)
 
     def _cancel_order(self, coid: str) -> None:
