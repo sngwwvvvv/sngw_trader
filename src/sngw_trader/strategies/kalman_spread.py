@@ -54,6 +54,7 @@ from sngw_trader.indicators.execution_recovery import (
     begin_entry,
     begin_exit,
     confirm_flatten,
+    emergency_flatten,
     on_fill,
     on_order_failure,
     on_timeout,
@@ -222,6 +223,7 @@ class KalmanSpreadStrategy(Strategy):
         self._order_seq = 0
         self._coid_legs: dict[str, tuple[int, str]] = {}
         self._rehedge_coids: set[str] = set()
+        self._rehedge_fill_ids: set[str] = set()
         self._trade_records: list[dict] = []
         self._realized_pnl_usdt = 0.0
         self._equity_high = config.equity_usdt
@@ -351,18 +353,31 @@ class KalmanSpreadStrategy(Strategy):
             self._submit_market(rt, intent.leg, side, intent.quantity, self._next_coid(rt, intent.leg))
 
     def _handle_exit(self, rt: _PairRuntime, request: ExitRequest) -> None:
-        if rt.exec_state.phase is not ExecutionPhase.OPEN:
-            return
-        self._order_seq += 1
-        y_coid = f"K{rt.spec.pair_id:02d}-Y-{self._order_seq}"
-        x_coid = f"K{rt.spec.pair_id:02d}-X-{self._order_seq}"
-        result = begin_exit(rt.exec_state, y_coid, x_coid,
-                            request.ts_ms / 1000.0 + self.config.leg_timeout_hours * 3600)
-        rt.exec_state = result.state
-        rt.exit_reason = request.reason
-        rt.exit_emergency = request.emergency
-        for intent in result.actions:   # SUBMIT with quantity = held qty
-            self._submit_intent(rt, intent, -rt.entry_side)
+        phase = rt.exec_state.phase
+        if phase is ExecutionPhase.OPEN:
+            self._order_seq += 1
+            y_coid = f"K{rt.spec.pair_id:02d}-Y-{self._order_seq}"
+            x_coid = f"K{rt.spec.pair_id:02d}-X-{self._order_seq}"
+            result = begin_exit(rt.exec_state, y_coid, x_coid,
+                                request.ts_ms / 1000.0 + self.config.leg_timeout_hours * 3600)
+            rt.exec_state = result.state
+            rt.exit_reason = request.reason
+            rt.exit_emergency = request.emergency
+            for intent in result.actions:   # SUBMIT with quantity = held qty
+                self._submit_intent(rt, intent, -rt.entry_side)
+        elif phase in (ExecutionPhase.ENTRY_PENDING, ExecutionPhase.ENTRY_PARTIAL):
+            result = emergency_flatten(rt.exec_state)   # cancel pendings, flatten held
+            rt.exec_state = result.state
+            rt.exit_reason = request.reason
+            rt.exit_emergency = request.emergency
+            for intent in result.actions:
+                self._submit_intent(rt, intent, rt.entry_side)
+            if rt.exec_state.phase is ExecutionPhase.IDLE:
+                self._reset_open_flags(rt)
+        elif phase in (ExecutionPhase.EXIT_PENDING, ExecutionPhase.EXIT_PARTIAL,
+                       ExecutionPhase.FLATTENING):
+            rt.exit_reason = request.reason   # exit already in flight; just re-tag it
+            rt.exit_emergency = request.emergency
 
     def _handle_rehedge(self, rt: _PairRuntime, request: RehedgeRequest) -> None:
         """Adjust only the X leg toward the new beta target (spec §2.4).
@@ -444,6 +459,9 @@ class KalmanSpreadStrategy(Strategy):
         side = 1 if event.order_side == OrderSide.BUY else -1
         fill_id = f"{coid}:{event.ts_init}"
         if coid in self._rehedge_coids:
+            if fill_id in self._rehedge_fill_ids:
+                return
+            self._rehedge_fill_ids.add(fill_id)
             self._apply_rehedge_fill(rt, leg, qty, price, side)
             return
         self._apply_fill(rt, leg, fill_id, qty, price, event.ts_init // 1_000_000, side)
@@ -452,6 +470,8 @@ class KalmanSpreadStrategy(Strategy):
         """Rehedge fills patch the X leg target/filled directly (no S05 phase).
         filled_quantity is the held magnitude, so the signed coin delta flips
         sign against the held direction (-entry_side for the X leg)."""
+        if rt.exec_state.phase is not ExecutionPhase.OPEN or rt.entry_side == 0:
+            return   # stale fill after the lifecycle moved on
         x_spec = self._contract_spec(f"{rt.spec.x_symbol}.OKX")
         coin_delta = Decimal(str(float(qty) * float(x_spec.ct_val))) * side
         x_leg = rt.exec_state.legs["X"]
@@ -616,6 +636,10 @@ class KalmanSpreadStrategy(Strategy):
         rt.x_marks = []
 
     def _reset_to_formation(self, rt: _PairRuntime) -> None:
+        """Cycle fields only. Position fields (entry_side/entry_beta/entry_ts_ms,
+        exec_state) survive so an exit requested alongside the reset still
+        dispatches with correct order sides; _reset_open_flags clears them at
+        trade close / rollback."""
         rt.phase = "FORMATION"
         rt.hours = 0
         rt.y_marks = []
@@ -626,9 +650,6 @@ class KalmanSpreadStrategy(Strategy):
         rt.prev_z = None
         rt.stop_hours = 0
         rt.hold_hours = 0
-        rt.entry_side = 0
-        rt.entry_beta = None
-        rt.entry_ts_ms = 0
 
     def _evaluate_gate(self, rt: _PairRuntime, ts_ms: int) -> tuple[bool, str]:
         """(entries_allowed, worst exit action) across both legs. With no
@@ -651,8 +672,13 @@ class KalmanSpreadStrategy(Strategy):
         return allowed, worst
 
     def _funding_screen_inputs(self, rt: _PairRuntime, ts_ms: int) -> tuple[float, int]:
-        """(corr(dFunding, e), max one-sided days) over the formation window."""
-        return 0.0, 0   # Task 3 wires the funding history; 0 keeps gates neutral
+        """(corr(dFunding, e), max one-sided days) over the formation window.
+
+        Funding history is wired for accrual and realized-cost accounting
+        (_accrue_funding / _finalize_trade); these formation-screen inputs
+        stay neutral 0 by design — using them is a documented Phase-2 ceiling.
+        """
+        return 0.0, 0
 
     # --- cost accounting and portfolio snapshot ----------------------------------
 
@@ -697,7 +723,7 @@ class KalmanSpreadStrategy(Strategy):
             mark = self._last_mark(f"{symbol}.OKX")
             held_side = self._held_side(rt, leg)
             rt.funding_obs.append(FundingObservation(
-                leg, ts_ms, float(rt.exec_state.legs[leg].filled_quantity) * held_side, mark, rate))
+                leg, ts_ms, float(self._leg_held(rt, leg)) * held_side, mark, rate))
 
     def _snapshot(self) -> PortfolioSnapshot:
         equity = Decimal(str(self._equity()))
@@ -798,7 +824,7 @@ class KalmanSpreadStrategy(Strategy):
                     continue
                 ct_val = float(self._contract_spec(f"{symbol}.OKX").ct_val)
                 held = (self._held_side(rt, leg)
-                        * float(rt.exec_state.legs[leg].filled_quantity) * ct_val)
+                        * float(self._leg_held(rt, leg)) * ct_val)
                 total += held * (self._last_mark(f"{symbol}.OKX") - avg)
         return total
 
@@ -808,7 +834,7 @@ class KalmanSpreadStrategy(Strategy):
             rt = self._pairs[pid]
             for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
                 ct_val = float(self._contract_spec(f"{symbol}.OKX").ct_val)
-                total += float(rt.exec_state.legs[leg].filled_quantity) * ct_val * self._last_mark(f"{symbol}.OKX")
+                total += float(self._leg_held(rt, leg)) * ct_val * self._last_mark(f"{symbol}.OKX")
         return total
 
     def _asset_exposure(self) -> dict[str, Decimal]:
@@ -817,7 +843,7 @@ class KalmanSpreadStrategy(Strategy):
             rt = self._pairs[pid]
             for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
                 ct_val = self._contract_spec(f"{symbol}.OKX").ct_val
-                notional = (self._held_side(rt, leg) * rt.exec_state.legs[leg].filled_quantity * ct_val
+                notional = (self._held_side(rt, leg) * self._leg_held(rt, leg) * ct_val
                             * Decimal(str(self._last_mark(f"{symbol}.OKX"))))
                 asset = symbol.split("-")[0]
                 exposure[asset] = exposure.get(asset, Decimal("0")) + notional
@@ -827,6 +853,15 @@ class KalmanSpreadStrategy(Strategy):
         if rt.entry_side == 0:
             return 0
         return rt.entry_side if leg == "Y" else -rt.entry_side
+
+    def _leg_held(self, rt: _PairRuntime, leg: str) -> Decimal:
+        """Held magnitude: during an exit, filled_quantity is a progress
+        counter, so what is still held is target - filled."""
+        leg_state = rt.exec_state.legs[leg]
+        if rt.exec_state.phase in (ExecutionPhase.EXIT_PENDING, ExecutionPhase.EXIT_PARTIAL):
+            target = leg_state.target_quantity or Decimal("0")
+            return max(target - leg_state.filled_quantity, Decimal("0"))
+        return leg_state.filled_quantity
 
     def _next_coid(self, rt: _PairRuntime, leg: str) -> str:
         self._order_seq += 1

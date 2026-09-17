@@ -404,3 +404,100 @@ def test_timeout_rolls_back_pending_entry(tmp_path):
     assert rt.exec_state.phase == ExecutionPhase.IDLE
     assert len(s.cancelled) == 2
     assert rt.entry_side == 0                      # optimistic side reset on rollback
+
+
+# --- controller-review regressions (F1-F4) ------------------------------------
+
+from sngw_trader.indicators.execution_recovery import LegState, LegStatus
+
+
+def _open_state(y_qty="0.208", x_qty="41.666"):
+    return ExecutionState(
+        phase=ExecutionPhase.OPEN,
+        legs={
+            "Y": LegState("Y", Decimal(y_qty), Decimal(y_qty), None, LegStatus.FILLED),
+            "X": LegState("X", Decimal(x_qty), Decimal(x_qty), None, LegStatus.FILLED),
+        },
+    )
+
+
+def _kill_events(tmp_path, effective_at):
+    events = tmp_path / "events.json"
+    events.write_text(
+        '[{"event_id":"e1","event_type":"MANUAL_KILL","symbol":"ETH-USDT-SWAP",'
+        '"effective_at":' + str(effective_at) + ',"expires_at":null,"source_status":"ACTIVE"}]'
+    )
+    return str(events)
+
+
+def test_emergency_exit_orders_have_direction(tmp_path):
+    s = _RecordingStrategy(config=_config(
+        events_path=_kill_events(tmp_path, 0.0), contract_specs_path=_specs_file(tmp_path)))
+    rt = s._pairs[1]
+    rt.phase = "TRADING"
+    rt.entry_side = -1                              # short spread open
+    rt.exec_state = _open_state()
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    kinds = [(leg, side) for _, leg, side, _, _ in s.submitted]
+    assert kinds == [("Y", 1), ("X", -1)]           # close short spread: buy Y, sell X
+
+
+def test_accrue_funding_during_exit_uses_held_qty(tmp_path):
+    s, rt = _trading_strategy(tmp_path, funding_dir=_funding_dir(tmp_path))
+    rt.entry_side = -1
+    rt.exec_state = ExecutionState(
+        phase=ExecutionPhase.EXIT_PENDING,
+        legs={
+            "Y": LegState("Y", Decimal("0.208"), Decimal("0.05"), None, LegStatus.PARTIAL),
+            "X": LegState("X", Decimal("41.666"), Decimal("10"), None, LegStatus.PARTIAL),
+        },
+    )
+    s._bars = {
+        InstrumentId.from_str("ETH-USDT-SWAP.OKX"): _bar("ETH", 0, 60_000.0),
+        InstrumentId.from_str("BTC-USDT-SWAP.OKX"): _bar("BTC", 0, 30_000.0),
+    }
+    s._accrue_funding(rt, 8 * HOUR_MS)
+    assert [(o.leg, o.signed_quantity) for o in rt.funding_obs] == [("Y", -0.158), ("X", 31.666)]
+
+
+def test_emergency_during_entry_partial_flattens(tmp_path):
+    s, rt = _trading_strategy(tmp_path, events_path=_kill_events(tmp_path, 3600.0),
+                              leg_timeout_hours=6.0)   # keep the 2h bar before the leg deadline
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    assert rt.exec_state.phase == ExecutionPhase.ENTRY_PENDING
+    s._apply_fill(rt, "Y", "f1", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60000)), HOUR_MS, -1)
+    assert rt.exec_state.phase == ExecutionPhase.ENTRY_PARTIAL
+    s.on_bar(_bar("BTC", 2 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 2 * HOUR_MS, 60_000.0))
+    kinds = [(leg, side) for _, leg, side, _, _ in s.submitted]
+    assert ("Y", 1) in kinds                          # flatten the held short Y
+    assert len(s.cancelled) == 1                      # cancel the unfilled X order
+
+
+class _StubFillEvent:
+    def __init__(self, coid, qty, price, side):
+        from nautilus_trader.model.enums import OrderSide
+        from nautilus_trader.model.identifiers import ClientOrderId
+        from nautilus_trader.model.objects import Price, Quantity
+
+        self.client_order_id = ClientOrderId(coid)
+        self.last_qty = Quantity(Decimal(str(qty)), 3)
+        self.last_px = Price(Decimal(str(price)), 2)
+        self.order_side = OrderSide.BUY if side > 0 else OrderSide.SELL
+        self.ts_init = 7 * HOUR_MS * 1_000_000
+
+
+def test_rehedge_fill_guards(tmp_path):
+    s, rt = _trading_strategy(tmp_path)
+    rt.entry_side = -1
+    rt.exec_state = _open_state()
+    s._coid_legs["K01-X-99"] = (1, "X")
+    s._rehedge_coids.add("K01-X-99")
+    event = _StubFillEvent("K01-X-99", 1, 30000.0, 1)
+    s._on_order_filled(event)
+    s._on_order_filled(event)                        # duplicate fill id ignored
+    assert len([f for f in rt.trade_fills if f[0] == "X"]) == 1
+    rt.exec_state = ExecutionState(phase=ExecutionPhase.EXIT_PENDING, legs=rt.exec_state.legs)
+    s._coid_legs["K01-X-100"] = (1, "X")
+    s._rehedge_coids.add("K01-X-100")
+    s._on_order_filled(_StubFillEvent("K01-X-100", 1, 30000.0, 1))   # stale: not OPEN
+    assert len([f for f in rt.trade_fills if f[0] == "X"]) == 1
