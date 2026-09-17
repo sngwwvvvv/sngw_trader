@@ -19,6 +19,7 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from sngw_trader.config import Settings, load_settings
+from sngw_trader.data.funding import fetch_funding_rates
 from sngw_trader.data.open_interest import (
     OI_INSTRUMENT_ID,
     OpenInterestPoint,
@@ -28,6 +29,9 @@ from sngw_trader.data.open_interest import (
 )
 
 _HISTORY_URL = "https://www.okx.com/api/v5/market/history-candles"
+_MARK_HISTORY_URL = "https://www.okx.com/api/v5/market/history-mark-price-candles"
+
+_BAR_SPEC = {"1H": "1-HOUR", "1m": "1-MINUTE"}
 
 
 def raw_candle_to_bar(
@@ -94,17 +98,35 @@ def load_instrument(settings: Settings) -> Instrument:
     return instruments[InstrumentId.from_str(settings.instrument_id_str)]
 
 
+def load_all_instruments(settings: Settings) -> dict:
+    """All OKX USDT-SWAP instruments keyed by InstrumentId."""
+    from nautilus_trader.adapters.okx import OKXInstrumentProvider
+    from nautilus_trader.core.nautilus_pyo3.okx import OKXInstrumentType
+
+    provider = OKXInstrumentProvider(
+        _okx_http_client(settings),
+        instrument_types=(OKXInstrumentType.SWAP,),
+    )
+    provider.load_all()
+    return provider.get_all()
+
+
+def _fetch_okx(url: str, params: dict) -> list[list[str]]:
+    req = urllib.request.Request(
+        url + "?" + urllib.parse.urlencode(params), headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if payload.get("code") != "0":
+        raise RuntimeError(f"OKX API error: {payload}")
+    return payload["data"]
+
+
 def _fetch_candles(symbol: str, after_ms: int | None, limit: int = 300) -> list[list[str]]:
     params = {"instId": symbol, "bar": "1m", "limit": str(limit)}
     if after_ms is not None:
         params["after"] = str(after_ms)
-    url = _HISTORY_URL + "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    if payload.get("code") != "0":
-        raise RuntimeError(f"OKX history-candles error: {payload}")
-    return payload["data"]
+    return _fetch_okx(_HISTORY_URL, params)
 
 
 def _validate_range(settings: Settings) -> None:
@@ -150,6 +172,84 @@ def download_bars(
         time.sleep(0.1)  # OKX rate limit guard; public candles, no auth
     bars.sort(key=lambda b: b.ts_init)  # catalog requires ascending ts_init
     return bars
+
+
+def raw_mark_candle_to_bar(
+    raw: list[str], instrument_id: str, price_prec: int, size_prec: int, bar: str = "1H"
+) -> Bar:
+    """row: [ts, o, h, l, c, confirm]; mark candles carry no volume."""
+    ts_ns = int(raw[0]) * 1_000_000
+    bar_type = BarType.from_str(f"{instrument_id}-{_BAR_SPEC[bar]}-MARK-EXTERNAL")
+    scale = Decimal(10) ** 9
+    return Bar.from_raw(
+        bar_type=bar_type,
+        open=Decimal(raw[1]) * scale,
+        high=Decimal(raw[2]) * scale,
+        low=Decimal(raw[3]) * scale,
+        close=Decimal(raw[4]) * scale,
+        price_prec=price_prec,
+        volume=Decimal("0"),
+        size_prec=size_prec,
+        ts_event=ts_ns,
+        ts_init=ts_ns,
+    )
+
+
+def download_mark_bars(settings: Settings, instrument: Instrument, symbol: str, bar: str = "1H") -> list[Bar]:
+    _validate_range(settings)
+    start_ms = int(settings.catalog_start.astimezone(timezone.utc).timestamp() * 1000)
+    end_ms = int(settings.catalog_end.astimezone(timezone.utc).timestamp() * 1000)
+    bars: list[Bar] = []
+    oldest = None
+    while True:
+        rows = _fetch_okx(_MARK_HISTORY_URL, {"instId": symbol, "bar": bar, "limit": "100", **({"after": str(oldest)} if oldest else {})})
+        if not rows:
+            break
+        for raw in rows:
+            ts_ms = int(raw[0])
+            if start_ms <= ts_ms <= end_ms:
+                bars.append(raw_mark_candle_to_bar(raw, f"{symbol}.OKX",
+                                                   instrument.price_precision, instrument.size_precision, bar))
+        oldest = int(rows[-1][0])
+        if oldest < start_ms or len(rows) < 100:
+            break
+        time.sleep(0.15)  # OKX public rate limit guard
+    bars.sort(key=lambda b: b.ts_init)  # catalog requires ascending ts_init
+    return bars
+
+
+def download_universe_mark_bars(settings: Settings, catalog: ParquetDataCatalog, symbols, bar: str = "1H") -> dict:
+    instruments = load_all_instruments(settings)
+    report: dict = {}
+    for symbol in symbols:
+        inst_id = InstrumentId.from_str(f"{symbol}.OKX")
+        instrument = instruments.get(inst_id)
+        if instrument is None:
+            raise ValueError(f"no OKX SWAP instrument for {inst_id}")
+        catalog.write_data([instrument], data_cls=Instrument)
+        bars = download_mark_bars(settings, instrument, symbol, bar)
+        if not bars:
+            report[symbol] = {"n": 0, "first": None, "last": None}
+            continue
+        catalog.write_data(bars, data_cls=Bar)
+        report[symbol] = {
+            "n": len(bars),
+            "first": _fmt(bars[0].ts_event),
+            "last": _fmt(bars[-1].ts_event),
+        }
+        print(f"{symbol}: {len(bars)} bars {_fmt(bars[0].ts_event)} -> {_fmt(bars[-1].ts_event)}")
+    return report
+
+
+def write_funding_history(inst_ids, start_ms: int, end_ms: int, out_dir: Path) -> dict[str, dict[int, float]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    history: dict[str, dict[int, float]] = {}
+    for inst_id in inst_ids:
+        rates = fetch_funding_rates(inst_id, start_ms, end_ms)
+        history[inst_id] = rates
+        with (out_dir / f"{inst_id}.json").open("w", encoding="utf-8") as f:
+            json.dump({str(ts): rate for ts, rate in sorted(rates.items())}, f)
+    return history
 
 
 def run_download(settings: Settings, catalog: ParquetDataCatalog) -> None:
