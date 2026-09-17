@@ -33,3 +33,11 @@
 
 - [Index](../../../ideas/kalman_MR_spread/INDEX.md)
 - [Main strategy spec](../../../ideas/kalman_MR_spread/OKX_Kalman_MR_Spec.md)
+
+## Session handoff — 2026-09-17 (S07 Phase 1 executed)
+
+- Design: docs/superpowers/specs/2026-09-17-kalman-mr-s07-validation-design.md (Phase 1/2 split approved).
+- Phase 1 plan: docs/superpowers/plans/2026-09-17-kalman-mr-s07-phase1-strategy-runner.md — all 6 tasks implemented, per-task reviews + final whole-branch review clean after one fix wave (ct_val accounting, per-symbol bar labels, stress multiplier, mutex at execution, flatten rejection retry, funding accrual during exit-in-flight).
+- Deliverables: src/sngw_trader/indicators/pair_screening.py, src/sngw_trader/strategies/kalman_spread.py, catalog_writer 1H mark + funding history, src/sngw_trader/research/kalman_walkforward.py, tests (test_pair_screening, test_kalman_spread_strategy, test_kalman_runner, test_kalman_smoke E2E green on synthetic catalog). Full suite 543 passed.
+- Key rulings: soft 2σ/c score uses sigma_u (hard gate stays sigma_e, 2.5c unchanged); seeded-pair generator x-vol 0.001; exit-side derived from kept position fields across window reset; rehedge fills bypass S05 with guards; nautilus 1.231 rejects MARK bars for execution -> smoke uses bar_execution=False + QuoteTick feed.
+- Phase 2 open items: (1) data download needs QuoteTick feed or LAST-bar venue redesign for execution (nautilus MARK-bar limitation); (2) curated event stream JSON for the 12-month window; (3) screening funding inputs (funding_corr, one-sided days) currently neutral 0 — wire from funding history; (4) data-gap rule (2h consecutive missing -> pair window invalid) not implemented — defer to Phase 2 data validation; (5) stress runs: baseline / 1.5x / 2x / slippage / partial fills via runner config; (6) aggregation + final verdict (research-only / paper-ready / live-ineligible), INDEX.md + main spec update.

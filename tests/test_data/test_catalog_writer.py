@@ -1,9 +1,14 @@
 from types import SimpleNamespace
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from nautilus_trader.model import Bar, BarType, InstrumentId
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
 
 from sngw_trader.data.catalog_writer import raw_candle_to_bar, run_download
+from sngw_trader.data import catalog_writer as cw
 from sngw_trader.data.open_interest import OpenInterestPoint
 from sngw_trader.runners.backtest_okx import default_bar_type
 
@@ -103,3 +108,99 @@ def test_run_download_rejects_non_btc_open_interest_before_request(monkeypatch) 
 
     with pytest.raises(SystemExit, match="BTC-USDT-SWAP.OKX"):
         run_download(settings, object())
+
+
+# --- mark candles + funding history (S07) ---
+
+
+def _settings_stub():
+    return type(
+        "S",
+        (),
+        {
+            "catalog_start": datetime(2023, 11, 1, tzinfo=timezone.utc),
+            "catalog_end": datetime(2023, 12, 1, tzinfo=timezone.utc),
+            "instrument_id_str": "BTC-USDT-SWAP.OKX",
+        },
+    )()
+
+
+def _instrument_stub():
+    return type(
+        "I",
+        (),
+        {"price_precision": 2, "size_precision": 3},
+    )()
+
+
+def test_raw_mark_candle_to_bar_maps_fields():
+    bar = cw.raw_mark_candle_to_bar(
+        ["1700000000000", "30000.5", "30100.0", "29950.0", "30080.2", "1"],
+        "BTC-USDT-SWAP.OKX",
+        price_prec=2,
+        size_prec=3,
+    )
+    assert str(bar.bar_type) == "BTC-USDT-SWAP.OKX-1-HOUR-MARK-EXTERNAL"
+    assert bar.close.as_decimal() == Decimal("30080.2")
+    assert bar.volume.as_decimal() == Decimal("0")   # mark candles carry no volume
+
+
+def test_download_mark_bars_paginates_and_sorts(monkeypatch):
+    pages = {
+        0: [["1700000000000", "1", "1", "1", "1", "1"], ["1700003600000", "2", "2", "2", "2", "1"]],
+    }
+
+    def fake_fetch(url, params):
+        assert "history-mark-price-candles" in url
+        after = int(params.get("after", 0))
+        if after == 0:
+            return pages[0]
+        return []          # second page empty -> stop
+
+    monkeypatch.setattr(cw, "_fetch_okx", fake_fetch)
+    bars = cw.download_mark_bars(_settings_stub(), _instrument_stub(), "BTC-USDT-SWAP", "1H")
+    assert [b.ts_init for b in bars] == sorted(b.ts_init for b in bars)
+    assert len(bars) == 2
+
+
+def test_download_universe_mark_bars_labels_per_symbol(monkeypatch):
+    written: list[tuple] = []
+
+    class FakeCatalog:
+        def write_data(self, data, data_cls):
+            written.append((data_cls, list(data)))
+
+    def fake_instruments(settings):
+        return {
+            InstrumentId.from_str("ETH-USDT-SWAP.OKX"): _instrument_stub(),
+            InstrumentId.from_str("BTC-USDT-SWAP.OKX"): _instrument_stub(),
+        }
+
+    def fake_fetch(url, params):
+        assert "history-mark-price-candles" in url
+        return [["1700000000000", "1", "1", "1", "1", "1"]]
+
+    monkeypatch.setattr(cw, "load_all_instruments", fake_instruments)
+    monkeypatch.setattr(cw, "_fetch_okx", fake_fetch)
+    report = cw.download_universe_mark_bars(
+        _settings_stub(), FakeCatalog(), ["ETH-USDT-SWAP", "BTC-USDT-SWAP"]
+    )
+    bar_ids = {
+        str(b.bar_type.instrument_id)
+        for data_cls, data in written if data_cls is Bar
+        for b in data
+    }
+    assert bar_ids == {"ETH-USDT-SWAP.OKX", "BTC-USDT-SWAP.OKX"}
+    assert report["ETH-USDT-SWAP"]["n"] == 1 and report["BTC-USDT-SWAP"]["n"] == 1
+    instruments = [d for data_cls, d in written if data_cls is Instrument]
+    assert len(instruments) == 2   # one per symbol, written before its bars
+
+
+def test_write_funding_history_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        cw, "fetch_funding_rates", lambda inst, s, e: {1_700_000_000_000: 0.0001, 1_700_028_800_000: -0.0002}
+    )
+    out = cw.write_funding_history(["BTC-USDT-SWAP"], 0, 2_000_000_000_000, tmp_path)
+    assert out["BTC-USDT-SWAP"][1_700_000_000_000] == 0.0001
+    loaded = (tmp_path / "BTC-USDT-SWAP.json").read_text()
+    assert "1700000000000" in loaded

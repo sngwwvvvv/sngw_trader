@@ -139,6 +139,72 @@ def build_run_config(
     )
 
 
+def build_multi_instrument_run_config(
+    catalog_path: str,
+    instrument_ids,
+    *,
+    start: datetime,
+    end: datetime,
+    taker_fee: float,
+    maker_fee: float,
+    prob_slippage: float,
+    prob_fill_on_limit: float,
+    latency_ms: int = 10,
+    starting_balance: str = "10_000 USDT",
+    bar_execution: bool = True,
+    dispose_on_completion: bool = True,
+    quiet: bool = True,
+) -> BacktestRunConfig:
+    """OKX venue + one bar-data config per instrument. Assembly only."""
+    venue = BacktestVenueConfig(
+        name="OKX",
+        oms_type=OmsType.NETTING,
+        account_type=AccountType.MARGIN,
+        book_type="L1_MBP",
+        starting_balances=[starting_balance],
+        # MARK bars are rejected by the nautilus 1.231 matching engine, so
+        # mark-price feeds must run with bar_execution=False and drive the
+        # book from a separate quote feed.
+        bar_execution=bar_execution,
+        fill_model=ImportableFillModelConfig(
+            fill_model_path="nautilus_trader.backtest.models:ProbabilisticFillModel",
+            config_path="nautilus_trader.backtest.config:FillModelConfig",
+            config=FillModelConfig(
+                prob_fill_on_limit=prob_fill_on_limit,
+                prob_slippage=prob_slippage,
+                random_seed=42,
+            ),
+        ),
+        fee_model=ImportableFeeModelConfig(
+            fee_model_path="sngw_trader.runners.backtest_models:OkxRateFeeModel",
+            config_path="sngw_trader.runners.backtest_models:OkxRateFeeModelConfig",
+            config={"maker_fee_rate": maker_fee, "taker_fee_rate": taker_fee},
+        ),
+        latency_model=ImportableLatencyModelConfig(
+            latency_model_path="nautilus_trader.backtest.models:LatencyModel",
+            config_path="nautilus_trader.backtest.config:LatencyModelConfig",
+            config=LatencyModelConfig(base_latency_nanos=latency_ms * 1_000_000),
+        ),
+    )
+    data = [
+        BacktestDataConfig(
+            data_cls=Bar,
+            catalog_path=catalog_path,
+            instrument_id=iid,
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+        )
+        for iid in instrument_ids
+    ]
+    return BacktestRunConfig(
+        venues=[venue],
+        data=data,
+        engine=BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)) if quiet else BacktestEngineConfig(),
+        dispose_on_completion=dispose_on_completion,
+        raise_exception=True,
+    )
+
+
 def attach_strategy(node: BacktestNode, run_id: object, settings: Settings) -> None:
     strategy = build_strategy(settings)
     if hasattr(node, "add_strategy"):
