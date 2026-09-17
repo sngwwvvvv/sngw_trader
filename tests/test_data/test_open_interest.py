@@ -204,6 +204,16 @@ def test_open_interest_data_type_records_source_provenance():
     assert metadata["open_interest_source"] == "OKX oi contract-value field"
 
 
+def test_open_interest_data_type_accepts_source_override():
+    metadata = open_interest_data_type("BTC-USDT-SWAP.OKX", source="custom").metadata
+    assert metadata["open_interest_source"] == "custom"
+    # 기본값 불변
+    assert (
+        open_interest_data_type("BTC-USDT-SWAP.OKX").metadata["open_interest_source"]
+        == "OKX oi contract-value field"
+    )
+
+
 def test_parse_open_interest_rows_rejects_non_5m_period_shape():
     with pytest.raises(ValueError, match="5-minute"):
         parse_open_interest_rows(

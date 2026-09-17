@@ -132,6 +132,12 @@ def test_load_settings_parses_oi_strategy(monkeypatch):
     assert load_settings().oi_strategy == "oi_b"
 
 
+def test_build_oi_run_config_does_not_dispose_on_completion():
+    config = build_oi_run_config(make_settings())
+
+    assert config.dispose_on_completion is False
+
+
 def test_build_oi_run_config_uses_price_1m_external_bar():
     settings = make_settings()
     config = build_oi_run_config(settings)

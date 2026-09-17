@@ -68,6 +68,7 @@ def build_oi_run_config(
     settings: Settings,
     start: datetime | None = None,
     end: datetime | None = None,
+    dispose_on_completion: bool = False,
 ) -> BacktestRunConfig:
     if settings.instrument_id_str != OI_INSTRUMENT_ID:
         raise SystemExit(
@@ -91,7 +92,7 @@ def build_oi_run_config(
         venues=base.venues,
         data=[data],
         engine=base.engine,
-        dispose_on_completion=base.dispose_on_completion,
+        dispose_on_completion=dispose_on_completion,
         raise_exception=base.raise_exception,
     )
 
