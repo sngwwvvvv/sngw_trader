@@ -48,6 +48,9 @@ class OiLiquidationMeanReversionConfig(StrategyConfig, frozen=True, kw_only=True
     session_end: str = "16:00"
     max_trades_per_session: int = 3
     close_positions_on_stop: bool = True
+    tp_mode: str = "band"  # "band": opposite BB band (spec 2026-09-16) | "atr": fill ± tp_atr_mult * ATR
+    tp_atr_mult: float = 2.0
+    hold_across_sessions: bool = False
 
 
 class OiLiquidationMeanReversion(Strategy):
@@ -55,6 +58,8 @@ class OiLiquidationMeanReversion(Strategy):
 
     def __init__(self, config: OiLiquidationMeanReversionConfig) -> None:
         super().__init__(config)
+        if config.tp_mode not in {"band", "atr"}:
+            raise ValueError(f"tp_mode must be 'band' or 'atr', got {config.tp_mode!r}")
         self._bb = BollingerBands(config.bb_period, config.bb_std)
         self._atr = AverageTrueRange(
             config.atr_period,
@@ -131,7 +136,8 @@ class OiLiquidationMeanReversion(Strategy):
 
         self._reset_session_if_needed(local_dt.date())
         if local_dt.weekday() >= 5 or local_dt.time() >= self._session_end:
-            self._force_flat(local_dt)
+            if not self.config.hold_across_sessions:
+                self._force_flat(local_dt)
             return
         if not self._session_is_valid(local_dt):
             return
@@ -294,7 +300,14 @@ class OiLiquidationMeanReversion(Strategy):
     def _submit_bracket(self, *, fill_price: float, quantity: Decimal, side: int) -> None:
         if self._captured_atr is None or self._captured_target is None:
             return
-        target = self._captured_target
+        if self.config.tp_mode == "atr":
+            target = (
+                fill_price + self.config.tp_atr_mult * self._captured_atr
+                if side == 1
+                else fill_price - self.config.tp_atr_mult * self._captured_atr
+            )
+        else:
+            target = self._captured_target
         if (side == 1 and target <= fill_price) or (side == -1 and target >= fill_price):
             request_flatten(self)
             return
