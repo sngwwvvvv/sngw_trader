@@ -10,13 +10,30 @@ Strategy logic only — no runner assembly, no exchange I/O.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from pathlib import Path
+from types import MappingProxyType
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model import Bar, BarType, InstrumentId
+from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.events import OrderFilled, OrderRejected
+from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading import Strategy
 
+from sngw_trader.indicators.cost_model import (
+    CostBreakdown,
+    Fill,
+    FundingObservation,
+    calculate_cost,
+)
+from sngw_trader.indicators.contract_sizing import (
+    ContractSpec,
+    contract_spec_from_instrument,
+    size_pair,
+)
 from sngw_trader.indicators.event_gate import (
     EXIT_EMERGENCY,
     EXIT_NONE,
@@ -26,13 +43,33 @@ from sngw_trader.indicators.event_gate import (
     GateLimits,
     evaluate_gate,
 )
-from sngw_trader.indicators.execution_recovery import ExecutionState
+from sngw_trader.indicators.execution_recovery import (
+    CANCEL_UNFILLED,
+    FLATTEN_FILLED,
+    SUBMIT,
+    ExecutionPhase,
+    ExecutionState,
+    FillObservation,
+    LegStatus,
+    begin_entry,
+    begin_exit,
+    confirm_flatten,
+    on_fill,
+    on_order_failure,
+    on_timeout,
+)
 from sngw_trader.indicators.kalman_spread import KalmanSpreadFilter
 from sngw_trader.indicators.pair_screening import (
     FormationStats,
     ScreenDecision,
     formation_stats,
     screen_pair,
+)
+from sngw_trader.indicators.portfolio_risk import (
+    PairCandidate,
+    PortfolioSnapshot,
+    RiskLimits,
+    approve_pair,
 )
 
 HOUR_MS = 3_600_000
@@ -180,6 +217,17 @@ class KalmanSpreadStrategy(Strategy):
         self._screen_results: dict[int, ScreenDecision] = {}
         self._pending_requests: list[EntryRequest | ExitRequest | RehedgeRequest] = []
         self._request_log: list[EntryRequest | ExitRequest | RehedgeRequest] = []
+        self._contracts: dict[str, ContractSpec] = _load_contract_specs(config.contract_specs_path)
+        self._funding: dict[str, dict[int, float]] = _load_funding_dir(config.funding_dir)
+        self._order_seq = 0
+        self._coid_legs: dict[str, tuple[int, str]] = {}
+        self._rehedge_coids: set[str] = set()
+        self._trade_records: list[dict] = []
+        self._realized_pnl_usdt = 0.0
+        self._equity_high = config.equity_usdt
+        self._day_key = -1
+        self._day_start_equity = config.equity_usdt
+        self._last_ts_ms = 0
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -191,6 +239,7 @@ class KalmanSpreadStrategy(Strategy):
     # --- bar routing ---------------------------------------------------------
 
     def on_bar(self, bar: Bar) -> None:
+        self._last_ts_ms = bar.ts_event // 1_000_000
         inst = bar.bar_type.instrument_id
         self._bars[inst] = bar
         for rt in self._pairs.values():
@@ -218,10 +267,245 @@ class KalmanSpreadStrategy(Strategy):
         self._execute_requests()
 
     def _execute_requests(self) -> None:
-        """Task 3 replaces this with real sizing/risk/execution; the audit
-        log of every emitted request stays in both tasks."""
-        self._request_log.extend(self._pending_requests)
-        self._pending_requests = []
+        pending, self._pending_requests = self._pending_requests, []
+        self._request_log.extend(pending)
+        for request in pending:
+            rt = self._pairs[request.pair_id]
+            if isinstance(request, EntryRequest):
+                self._handle_entry(rt, request)
+            elif isinstance(request, ExitRequest):
+                self._handle_exit(rt, request)
+            else:
+                self._handle_rehedge(rt, request)
+
+    # --- request execution ------------------------------------------------------
+
+    def _handle_entry(self, rt: _PairRuntime, request: EntryRequest) -> None:
+        cfg = self.config
+        if rt.exec_state.phase not in (ExecutionPhase.IDLE, ExecutionPhase.CLOSED):
+            return
+        target_n = self._target_notional(rt, request.beta)
+        if target_n is None:
+            return
+        try:
+            sizing = size_pair(
+                target_notional_usdt=Decimal(str(target_n)),
+                beta=Decimal(str(request.beta)),
+                y_price=Decimal(str(request.y_mark)),
+                x_price=Decimal(str(request.x_mark)),
+                y_contract=self._contract_spec(f"{rt.spec.y_symbol}.OKX"),
+                x_contract=self._contract_spec(f"{rt.spec.x_symbol}.OKX"),
+            )
+        except ValueError as exc:   # below minSz etc. -> skip this entry
+            self.log.warning(f"pair {rt.spec.pair_id} sizing failed: {exc}")
+            return
+        candidate = PairCandidate(
+            pair_id=str(rt.spec.pair_id),
+            y_asset=rt.spec.y_symbol.split("-")[0],
+            x_asset=rt.spec.x_symbol.split("-")[0],
+            sizing=sizing,
+            margin_usdt=sizing.gross_notional_usdt / Decimal(str(cfg.leverage)),
+            cost=self._estimate_cost(rt, sizing),
+            y_price_usdt=Decimal(str(request.y_mark)),
+            x_price_usdt=Decimal(str(request.x_mark)),
+            y_side=request.side,
+            x_side=-request.side,
+        )
+        decision = approve_pair(self._snapshot(), candidate, self._risk_limits(rt.spec))
+        if not decision.approved:
+            self.log.warning(f"pair {rt.spec.pair_id} entry rejected: {decision.reasons}")
+            return
+        self._order_seq += 1
+        y_coid = f"K{rt.spec.pair_id:02d}-Y-{self._order_seq}"
+        x_coid = f"K{rt.spec.pair_id:02d}-X-{self._order_seq}"
+        deadline = request.ts_ms / 1000.0 + cfg.leg_timeout_hours * 3600
+        result = begin_entry(rt.exec_state, sizing.y_quantity, sizing.x_quantity,
+                             y_coid, x_coid, deadline, request.beta)
+        rt.exec_state = result.state
+        if result.reasons:
+            return
+        rt.entry_side = request.side
+        rt.entry_beta = request.beta
+        rt.entry_ts_ms = request.ts_ms
+        rt.stop_hours = 0
+        rt.hold_hours = 0
+        rt.trade_fills = []
+        rt.s02_fills = []
+        rt.funding_obs = []
+        rt.entry_avg = {}
+        rt.decision_marks = {"Y": request.y_mark, "X": request.x_mark}
+        for intent in result.actions:
+            self._submit_intent(rt, intent, request.side)
+
+    def _submit_intent(self, rt: _PairRuntime, intent, y_side: int) -> None:
+        """y_side is the Y-leg side of the enclosing lifecycle step
+        (+entry_side for entries, -entry_side for exits)."""
+        if intent.kind == SUBMIT:
+            leg = intent.leg
+            side = y_side if leg == "Y" else -y_side
+            self._submit_market(rt, leg, side, intent.quantity, intent.client_order_id)
+        elif intent.kind == CANCEL_UNFILLED:
+            self._cancel_order(intent.client_order_id)
+        elif intent.kind == FLATTEN_FILLED:
+            side = -self._held_side(rt, intent.leg)
+            self._submit_market(rt, intent.leg, side, intent.quantity, self._next_coid(rt, intent.leg))
+
+    def _handle_exit(self, rt: _PairRuntime, request: ExitRequest) -> None:
+        if rt.exec_state.phase is not ExecutionPhase.OPEN:
+            return
+        self._order_seq += 1
+        y_coid = f"K{rt.spec.pair_id:02d}-Y-{self._order_seq}"
+        x_coid = f"K{rt.spec.pair_id:02d}-X-{self._order_seq}"
+        result = begin_exit(rt.exec_state, y_coid, x_coid,
+                            request.ts_ms / 1000.0 + self.config.leg_timeout_hours * 3600)
+        rt.exec_state = result.state
+        rt.exit_reason = request.reason
+        rt.exit_emergency = request.emergency
+        for intent in result.actions:   # SUBMIT with quantity = held qty
+            self._submit_intent(rt, intent, -rt.entry_side)
+
+    def _handle_rehedge(self, rt: _PairRuntime, request: RehedgeRequest) -> None:
+        """Adjust only the X leg toward the new beta target (spec §2.4).
+        Rehedge orders live outside the S05 entry/exit lifecycle; their fills
+        patch the X leg target/filled directly."""
+        if rt.exec_state.phase is not ExecutionPhase.OPEN:
+            return
+        x_mark = self._last_mark(f"{rt.spec.x_symbol}.OKX")
+        y_mark = self._last_mark(f"{rt.spec.y_symbol}.OKX")
+        target_n = self._target_notional(rt, request.beta)
+        if target_n is None:
+            return
+        try:
+            sizing = size_pair(
+                target_notional_usdt=Decimal(str(target_n)),
+                beta=Decimal(str(request.beta)),
+                y_price=Decimal(str(y_mark)),
+                x_price=Decimal(str(x_mark)),
+                y_contract=self._contract_spec(f"{rt.spec.y_symbol}.OKX"),
+                x_contract=self._contract_spec(f"{rt.spec.x_symbol}.OKX"),
+            )
+        except ValueError as exc:
+            self.log.warning(f"pair {rt.spec.pair_id} rehedge sizing failed: {exc}")
+            return
+        x_spec = self._contract_spec(f"{rt.spec.x_symbol}.OKX")
+        ct_val = float(x_spec.ct_val)
+        held_coin = float(rt.exec_state.legs["X"].filled_quantity) * ct_val
+        target_coin = float(sizing.x_quantity) * ct_val
+        held_signed = -rt.entry_side * held_coin       # X held signed (long spread: X short)
+        target_signed = -rt.entry_side * target_coin
+        delta_signed = target_signed - held_signed
+        if abs(delta_signed) < float(x_spec.min_sz) * ct_val:
+            return
+        self._order_seq += 1
+        coid = f"K{rt.spec.pair_id:02d}-X-{self._order_seq}"
+        self._coid_legs[coid] = (rt.spec.pair_id, "X")
+        self._rehedge_coids.add(coid)
+        side = 1 if delta_signed > 0 else -1
+        qty = (Decimal(str(abs(delta_signed) / ct_val)).quantize(x_spec.lot_sz))
+        self._submit_market(rt, "X", side, qty, coid)
+        rt.rehedge_target_x = sizing.x_quantity
+
+    # --- fills, rejects, timeouts ------------------------------------------------
+
+    def _apply_fill(self, rt: _PairRuntime, leg: str, fill_id: str, qty: Decimal,
+                    price: Decimal, ts_ms: int, side: int) -> None:
+        """side = order side of the fill (+1 buy, -1 sell); comes from the
+        OrderFilled event (or the test)."""
+        if rt.exec_state.phase is ExecutionPhase.FLATTENING:
+            result = confirm_flatten(rt.exec_state, [FillObservation(leg, fill_id, qty, price, price)],
+                                     cooldown_deadline=ts_ms / 1000.0 + rt.spec.cooldown_hours * 3600)
+        else:
+            reference = Decimal(str(rt.decision_marks.get(leg, float(price))))
+            result = on_fill(rt.exec_state, FillObservation(leg, fill_id, qty, price, reference))
+        rt.exec_state = result.state
+        for intent in result.actions:   # e.g. slippage rollback: cancel/flatten siblings
+            self._submit_intent(rt, intent, rt.entry_side)
+        if result.reasons == ("DUPLICATE_FILL",):
+            return
+        inst_id = f"{rt.spec.y_symbol if leg == 'Y' else rt.spec.x_symbol}.OKX"
+        rt.trade_fills.append((leg, float(qty) * side, float(price)))
+        rt.s02_fills.append(Fill(leg, float(qty) * side, float(price),
+                                 self.config.taker_fee * self.config.cost_multiplier,
+                                 self._half_spread_rate(inst_id)))
+        if rt.exec_state.phase is ExecutionPhase.OPEN:
+            rt.entry_avg[leg] = float(price)
+        if rt.exec_state.phase is ExecutionPhase.CLOSED:
+            self._finalize_trade(rt, ts_ms)
+
+    def _on_order_filled(self, event) -> None:
+        coid = event.client_order_id.value
+        mapping = self._coid_legs.get(coid)
+        if mapping is None:
+            return
+        pair_id, leg = mapping
+        rt = self._pairs[pair_id]
+        qty = event.last_qty.as_decimal()
+        price = event.last_px.as_decimal()
+        side = 1 if event.order_side == OrderSide.BUY else -1
+        fill_id = f"{coid}:{event.ts_init}"
+        if coid in self._rehedge_coids:
+            self._apply_rehedge_fill(rt, leg, qty, price, side)
+            return
+        self._apply_fill(rt, leg, fill_id, qty, price, event.ts_init // 1_000_000, side)
+
+    def _apply_rehedge_fill(self, rt: _PairRuntime, leg: str, qty: Decimal, price: Decimal, side: int) -> None:
+        """Rehedge fills patch the X leg target/filled directly (no S05 phase).
+        filled_quantity is the held magnitude, so the signed coin delta flips
+        sign against the held direction (-entry_side for the X leg)."""
+        x_spec = self._contract_spec(f"{rt.spec.x_symbol}.OKX")
+        coin_delta = Decimal(str(float(qty) * float(x_spec.ct_val))) * side
+        x_leg = rt.exec_state.legs["X"]
+        new_filled = x_leg.filled_quantity + coin_delta * (-rt.entry_side) / x_spec.ct_val
+        if new_filled < 0:
+            new_filled = Decimal("0")
+        new_target = rt.rehedge_target_x if rt.rehedge_target_x is not None else x_leg.target_quantity
+        legs = dict(rt.exec_state.legs)
+        legs["X"] = replace(x_leg, target_quantity=new_target, filled_quantity=new_filled,
+                            status=LegStatus.FILLED)
+        rt.exec_state = replace(rt.exec_state, legs=MappingProxyType(legs))
+        rt.trade_fills.append(("X", float(qty) * side, float(price)))
+        rt.s02_fills.append(Fill("X", float(qty) * side, float(price),
+                                 self.config.taker_fee * self.config.cost_multiplier,
+                                 self._half_spread_rate(f"{rt.spec.x_symbol}.OKX")))
+
+    def on_event(self, event) -> None:
+        if isinstance(event, OrderFilled):
+            self._on_order_filled(event)
+        elif isinstance(event, OrderRejected):
+            mapping = self._coid_legs.get(event.client_order_id.value)
+            if mapping is None:
+                return
+            rt = self._pairs[mapping[0]]
+            result = on_order_failure(rt.exec_state, mapping[1])
+            rt.exec_state = result.state
+            for intent in result.actions:
+                self._submit_intent(rt, intent, rt.entry_side)
+            if rt.exec_state.phase is ExecutionPhase.CLOSED:
+                self._finalize_trade(rt, self._last_ts_ms)
+            elif rt.exec_state.phase is ExecutionPhase.IDLE:
+                self._reset_open_flags(rt)
+
+    def _reset_open_flags(self, rt: _PairRuntime) -> None:
+        rt.entry_side = 0
+        rt.entry_beta = None
+        rt.stop_hours = 0
+        rt.hold_hours = 0
+        rt.trade_fills = []
+        rt.s02_fills = []
+        rt.funding_obs = []
+        rt.entry_avg = {}
+
+    def _check_timeout(self, rt: _PairRuntime, now_s: float):
+        result = on_timeout(rt.exec_state, now_s)
+        if result.state is not rt.exec_state:
+            rt.exec_state = result.state
+            for intent in result.actions:
+                self._submit_intent(rt, intent, rt.entry_side)
+            if rt.exec_state.phase is ExecutionPhase.CLOSED:
+                self._finalize_trade(rt, int(now_s * 1000))
+            elif rt.exec_state.phase is ExecutionPhase.IDLE:
+                self._reset_open_flags(rt)
+        return None
 
     # --- per-pair decision core ----------------------------------------------
 
@@ -230,7 +514,7 @@ class KalmanSpreadStrategy(Strategy):
         spec = rt.spec
         now_s = ts_ms / 1000.0
         requests: list = []
-        timeout_request = self._check_timeout(rt, now_s)   # Task 3; returns None in Phase 1
+        timeout_request = self._check_timeout(rt, now_s)
         if rt.phase == "FORMATION":
             rt.y_marks.append(y_mark)
             rt.x_marks.append(x_mark)
@@ -241,7 +525,6 @@ class KalmanSpreadStrategy(Strategy):
         rt.hours += 1
         gate_allowed, gate = self._evaluate_gate(rt, ts_ms)
         if gate == EXIT_EMERGENCY:
-            # entry_side is the decision-core exposure flag until Task 3 wires fills
             if rt.has_exposure or rt.entry_side != 0:
                 requests.append(ExitRequest(spec.pair_id, "STOP_EVENT", True, ts_ms))
             self._reset_to_formation(rt)
@@ -280,11 +563,6 @@ class KalmanSpreadStrategy(Strategy):
         rt.prev_z = z
         return requests
 
-    def _check_timeout(self, rt: _PairRuntime, now_s: float):
-        """Task 3 implements leg-timeout flattening; stub keeps the call site
-        (timeout runs before any decision) fixed."""
-        return None
-
     def _exit_decision(self, rt: _PairRuntime, res, ts_ms: int):
         spec = rt.spec
         z = res.z_score
@@ -319,9 +597,6 @@ class KalmanSpreadStrategy(Strategy):
             return EntryRequest(spec.pair_id, -1 if res.z_score > 0 else 1, res.beta,
                                 y_mark, x_mark, ts_ms)
         return None
-
-    def _accrue_funding(self, rt: _PairRuntime, ts_ms: int) -> None:
-        """Task 3 wires the funding history; no-op keeps the call site fixed."""
 
     def _complete_formation(self, rt: _PairRuntime, ts_ms: int) -> None:
         cfg = self.config
@@ -379,6 +654,204 @@ class KalmanSpreadStrategy(Strategy):
         """(corr(dFunding, e), max one-sided days) over the formation window."""
         return 0.0, 0   # Task 3 wires the funding history; 0 keeps gates neutral
 
+    # --- cost accounting and portfolio snapshot ----------------------------------
+
+    def _finalize_trade(self, rt: _PairRuntime, ts_ms: int) -> None:
+        fills = rt.s02_fills
+        funding = rt.funding_obs
+        expected = list(range(rt.entry_ts_ms // FUNDING_PERIOD_MS * FUNDING_PERIOD_MS + FUNDING_PERIOD_MS,
+                              ts_ms, FUNDING_PERIOD_MS))
+        cost, cost_error = None, None
+        if fills and expected:
+            try:
+                cost = calculate_cost(fills, funding, expected_funding_timestamps=expected)
+            except ValueError as exc:
+                cost_error = str(exc)   # missing/duplicate funding fails closed (S02 contract)
+        elif fills:
+            cost_error = "no funding timestamps in holding period"
+        pnl = -sum(signed * price for _, signed, price in rt.trade_fills)
+        self._realized_pnl_usdt += pnl
+        if cost is not None:
+            self._realized_pnl_usdt -= cost.total_usdt
+        self._trade_records.append({
+            "pair_id": rt.spec.pair_id,
+            "entry_ts_ms": rt.entry_ts_ms,
+            "exit_ts_ms": ts_ms,
+            "reason": rt.exit_reason or "UNKNOWN",
+            "pnl_usdt": pnl,
+            "cost": cost,
+            "cost_error": cost_error,
+        })
+        rt.exec_state = replace(rt.exec_state,
+                                cooldown_deadline=ts_ms / 1000.0 + rt.spec.cooldown_hours * 3600)
+        self._reset_open_flags(rt)
+
+    def _accrue_funding(self, rt: _PairRuntime, ts_ms: int) -> None:
+        """Record S02 FundingObservations for both legs at OKX 8h stamps while open."""
+        if rt.entry_side == 0 or ts_ms % FUNDING_PERIOD_MS != 0:
+            return
+        for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
+            rate = self._funding.get(symbol, {}).get(ts_ms)
+            if rate is None:
+                continue   # absent observation -> calculate_cost fails closed at close
+            mark = self._last_mark(f"{symbol}.OKX")
+            held_side = self._held_side(rt, leg)
+            rt.funding_obs.append(FundingObservation(
+                leg, ts_ms, float(rt.exec_state.legs[leg].filled_quantity) * held_side, mark, rate))
+
+    def _snapshot(self) -> PortfolioSnapshot:
+        equity = Decimal(str(self._equity()))
+        gross = Decimal(str(self._gross_notional()))
+        margin_in_use = Decimal("0")
+        for pid in self._open_pairs():
+            rt = self._pairs[pid]
+            for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
+                ct_val = self._contract_spec(f"{symbol}.OKX").ct_val
+                margin_in_use += (rt.exec_state.legs[leg].filled_quantity * ct_val
+                                  * Decimal(str(self._last_mark(f"{symbol}.OKX"))))
+        day = self._last_ts_ms // DAY_MS
+        if day != self._day_key:
+            self._day_key = day
+            self._day_start_equity = float(equity)
+        self._equity_high = max(self._equity_high, float(equity))
+        return PortfolioSnapshot(
+            equity_usdt=equity,
+            peak_equity_usdt=Decimal(str(self._equity_high)),
+            daily_loss_usdt=Decimal(str(max(0.0, self._day_start_equity - float(equity)))),
+            liquidation_buffer_usdt=equity - margin_in_use,
+            active_pairs=frozenset(str(p) for p in self._open_pairs()),
+            gross_notional_usdt=gross,
+            asset_exposure_usdt=self._asset_exposure(),
+        )
+
+    def _risk_limits(self, spec: PairBandSpec) -> RiskLimits:
+        equity = Decimal(str(self._equity()))
+        return RiskLimits(
+            max_active_pairs=4,
+            max_gross_exposure_ratio=Decimal("1.5"),
+            max_pair_margin_ratio=Decimal(str(spec.margin_cap_ratio)),
+            max_asset_exposure_usdt=equity * Decimal("1.5"),
+            max_daily_loss_usdt=equity * Decimal("0.03"),
+            max_drawdown_ratio=Decimal("0.15"),
+            min_liquidation_buffer_usdt=Decimal("0"),
+        )
+
+    # --- small helpers ------------------------------------------------------------
+
+    def _contract_spec(self, inst_id: str) -> ContractSpec:
+        spec = self._contracts.get(inst_id)
+        if spec is not None:
+            return spec
+        instrument = self.cache.instrument(InstrumentId.from_str(inst_id))
+        if instrument is None:
+            raise ValueError(f"no contract spec for {inst_id}")
+        return contract_spec_from_instrument(instrument)
+
+    def _last_mark(self, inst_id: str) -> float:
+        bar = self._bars.get(InstrumentId.from_str(inst_id))
+        if bar is None:
+            raise ValueError(f"no mark yet for {inst_id}")
+        return float(bar.close.as_decimal())
+
+    def _half_spread_rate(self, inst_id: str) -> float:
+        bps = self.config.btc_half_spread_bps if inst_id.startswith("BTC") else self.config.alt_half_spread_bps
+        return bps / 10_000 * self.config.cost_multiplier
+
+    def _target_notional(self, rt: _PairRuntime, beta: float) -> float | None:
+        """N = equity * risk_frac * sigma_multiple * size_weight / sigma_u,
+        clamped by the pair margin cap (margin = gross / leverage)."""
+        if rt.sigma_u is None or rt.sigma_u <= 0:
+            return None
+        cfg = self.config
+        equity = self._equity()
+        n = equity * cfg.risk_frac * rt.spec.sigma_multiple * rt.spec.size_weight / rt.sigma_u
+        gross = n * (1.0 + beta)
+        cap = equity * rt.spec.margin_cap_ratio
+        if gross > cap:
+            n *= cap / gross
+        return n
+
+    def _estimate_cost(self, rt: _PairRuntime, sizing) -> CostBreakdown:
+        """Entry-time round-trip estimate for the S04 gate (realized cost is
+        accounted per fill via S02 at trade close)."""
+        cfg = self.config
+        gross = float(sizing.gross_notional_usdt)
+        fee = 2 * cfg.taker_fee * cfg.cost_multiplier * gross
+        spread = 2 * 0.5 * (self._half_spread_rate(f"{rt.spec.y_symbol}.OKX")
+                            + self._half_spread_rate(f"{rt.spec.x_symbol}.OKX")) * gross
+        funding = cfg.funding_rate_assumption * gross
+        return CostBreakdown(fee, spread, funding, fee + spread + funding)
+
+    def _equity(self) -> float:
+        return self.config.equity_usdt + self._realized_pnl_usdt + self._unrealized_pnl()
+
+    def _open_pairs(self) -> list[int]:
+        return [pid for pid, rt in self._pairs.items() if rt.entry_side != 0]
+
+    def _unrealized_pnl(self) -> float:
+        total = 0.0
+        for pid in self._open_pairs():
+            rt = self._pairs[pid]
+            for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
+                avg = rt.entry_avg.get(leg)
+                if avg is None:
+                    continue
+                ct_val = float(self._contract_spec(f"{symbol}.OKX").ct_val)
+                held = (self._held_side(rt, leg)
+                        * float(rt.exec_state.legs[leg].filled_quantity) * ct_val)
+                total += held * (self._last_mark(f"{symbol}.OKX") - avg)
+        return total
+
+    def _gross_notional(self) -> float:
+        total = 0.0
+        for pid in self._open_pairs():
+            rt = self._pairs[pid]
+            for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
+                ct_val = float(self._contract_spec(f"{symbol}.OKX").ct_val)
+                total += float(rt.exec_state.legs[leg].filled_quantity) * ct_val * self._last_mark(f"{symbol}.OKX")
+        return total
+
+    def _asset_exposure(self) -> dict[str, Decimal]:
+        exposure: dict[str, Decimal] = {}
+        for pid in self._open_pairs():
+            rt = self._pairs[pid]
+            for leg, symbol in (("Y", rt.spec.y_symbol), ("X", rt.spec.x_symbol)):
+                ct_val = self._contract_spec(f"{symbol}.OKX").ct_val
+                notional = (self._held_side(rt, leg) * rt.exec_state.legs[leg].filled_quantity * ct_val
+                            * Decimal(str(self._last_mark(f"{symbol}.OKX"))))
+                asset = symbol.split("-")[0]
+                exposure[asset] = exposure.get(asset, Decimal("0")) + notional
+        return exposure
+
+    def _held_side(self, rt: _PairRuntime, leg: str) -> int:
+        if rt.entry_side == 0:
+            return 0
+        return rt.entry_side if leg == "Y" else -rt.entry_side
+
+    def _next_coid(self, rt: _PairRuntime, leg: str) -> str:
+        self._order_seq += 1
+        coid = f"K{rt.spec.pair_id:02d}-{leg}-{self._order_seq}"
+        self._coid_legs[coid] = (rt.spec.pair_id, leg)
+        return coid
+
+    def _submit_market(self, rt: _PairRuntime, leg: str, side: int, qty: Decimal, coid: str) -> None:
+        symbol = rt.spec.y_symbol if leg == "Y" else rt.spec.x_symbol
+        inst_id = f"{symbol}.OKX"
+        spec = self._contract_spec(inst_id)
+        precision = abs(spec.lot_sz.as_tuple().exponent)
+        self.order_factory.market(
+            instrument_id=InstrumentId.from_str(inst_id),
+            order_side=OrderSide.BUY if side > 0 else OrderSide.SELL,
+            quantity=Quantity(qty, precision),
+            client_order_id=ClientOrderId(coid),
+        )
+        self._coid_legs[coid] = (rt.spec.pair_id, leg)
+
+    def _cancel_order(self, coid: str) -> None:
+        order = self.cache.order(ClientOrderId(coid))
+        if order is not None:
+            self.cancel_order(order)
+
 
 def _load_events(path: str) -> tuple[EventRecord, ...]:
     if not path:
@@ -397,3 +870,26 @@ def _load_events(path: str) -> tuple[EventRecord, ...]:
         )
         for row in rows
     )
+
+
+def _load_contract_specs(path: str) -> dict[str, ContractSpec]:
+    if not path:
+        return {}
+    with open(path, encoding="utf-8") as f:
+        rows = json.load(f)
+    return {
+        inst_id: ContractSpec(Decimal(str(row["ct_val"])), Decimal(str(row["lot_sz"])),
+                              Decimal(str(row["min_sz"])), int(row["price_precision"]))
+        for inst_id, row in rows.items()
+    }
+
+
+def _load_funding_dir(path: str) -> dict[str, dict[int, float]]:
+    if not path:
+        return {}
+    out: dict[str, dict[int, float]] = {}
+    for file in Path(path).glob("*.json"):
+        with open(file, encoding="utf-8") as f:
+            rows = json.load(f)
+        out[file.stem] = {int(ts): float(rate) for ts, rate in rows.items()}
+    return out

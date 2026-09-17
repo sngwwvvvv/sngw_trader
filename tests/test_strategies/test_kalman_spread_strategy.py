@@ -21,6 +21,7 @@ BAR_TYPES = {
     iid: BarType.from_str(f"{iid}-1-HOUR-MARK-EXTERNAL") for iid in INSTRUMENT_IDS
 }
 HOUR_MS = 3_600_000
+_RAW_SCALE = Decimal(10) ** 9   # Bar.from_raw takes 1e9-scaled fixed-point values
 
 
 def _config(**overrides) -> KalmanSpreadConfig:
@@ -50,12 +51,12 @@ def _seeded_pair(n=720, seed=7):
 def _bar(symbol: str, ts_ms: int, close: float) -> Bar:
     return Bar.from_raw(
         bar_type=BAR_TYPES[f"{symbol}-USDT-SWAP.OKX"],
-        open=Decimal(str(close - 1)),
-        high=Decimal(str(close)),
-        low=Decimal(str(close - 2)),
-        close=Decimal(str(close)),
+        open=Decimal(str(close - 1)) * _RAW_SCALE,
+        high=Decimal(str(close)) * _RAW_SCALE,
+        low=Decimal(str(close - 2)) * _RAW_SCALE,
+        close=Decimal(str(close)) * _RAW_SCALE,
         price_prec=2,
-        volume=Decimal("100"),
+        volume=Decimal("100") * _RAW_SCALE,
         size_prec=3,
         ts_event=ts_ms * 1_000_000,
         ts_init=ts_ms * 1_000_000,
@@ -216,6 +217,16 @@ def test_stop_flip_on_adverse_excursion():
     assert exits[-1].reason == "STOP_FLIP"
 
 
+def test_stop_time_at_hold_limit():
+    s = KalmanSpreadStrategy(config=_config())
+    rt = s._pairs[1]
+    rt.phase, rt.kf, rt.entry_side = "TRADING", _StubFilter([1.0]), -1
+    rt.hl_hours, rt.hold_hours = 24.0, 48   # max_hold = 2.0 * 24 = 48
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    exits = [r for r in s._request_log if isinstance(r, ExitRequest)]
+    assert exits[-1].reason == "STOP_TIME"
+
+
 def test_manual_kill_event_exits_emergency(tmp_path):
     events = tmp_path / "events.json"
     events.write_text(
@@ -265,3 +276,131 @@ class _StubFilter:
 
     def update(self, y_price, x_price):
         return self._results.pop(0)
+
+
+# --- execution binding (Task 3) ----------------------------------------------
+
+import json as _json
+
+from sngw_trader.indicators.execution_recovery import ExecutionPhase, ExecutionState
+
+
+def _specs_file(tmp_path):
+    specs = {
+        "ETH-USDT-SWAP.OKX": {"ct_val": 0.1, "lot_sz": 0.001, "min_sz": 0.001, "price_precision": 2},
+        "BTC-USDT-SWAP.OKX": {"ct_val": 0.001, "lot_sz": 0.001, "min_sz": 0.001, "price_precision": 2},
+    }
+    p = tmp_path / "specs.json"
+    p.write_text(_json.dumps(specs))
+    return str(p)
+
+
+class _RecordingStrategy(KalmanSpreadStrategy):
+    def __init__(self, config):
+        super().__init__(config)
+        self.submitted: list[tuple[str, str, int, str, str]] = []
+        self.cancelled: list[str] = []
+
+    def _submit_market(self, rt, leg, side, qty, coid):
+        self.submitted.append((rt.spec.pair_id, leg, side, str(qty), coid))
+
+    def _cancel_order(self, coid):
+        self.cancelled.append(coid)
+
+
+def _trading_strategy(tmp_path, **overrides):
+    s = _RecordingStrategy(config=_config(
+        formation_hours=72, trading_hours=240,
+        contract_specs_path=_specs_file(tmp_path), **overrides))
+    rt = s._pairs[1]
+    rt.phase = "TRADING"
+    rt.kf = _StubFilter([1.7])          # z crosses up -> short spread
+    rt.prev_z = 0.5                     # below entry band so the first bar crosses up
+    rt.sigma_u = 0.01
+    rt.hl_hours = 24.0
+    return s, rt
+
+
+def _funding_dir(tmp_path, rates=(0.0001,)):
+    """Funding history JSONs for both legs with a stamp at 8h."""
+    d = tmp_path / "funding"
+    d.mkdir(exist_ok=True)
+    stamp = 8 * HOUR_MS
+    (d / "ETH-USDT-SWAP.json").write_text(_json.dumps({str(stamp): rates[0]}))
+    (d / "BTC-USDT-SWAP.json").write_text(_json.dumps({str(stamp): rates[0]}))
+    return str(d)
+
+
+def _fill(s, rt, leg, fill_id, price, ts_ms, close=True):
+    leg_state = rt.exec_state.legs[leg]
+    if close:
+        qty = leg_state.target_quantity          # exit fill closes the full leg
+    else:
+        qty = leg_state.target_quantity          # entry fill reaches the full target
+    side = -rt.entry_side if leg == "Y" else rt.entry_side   # closing side
+    s._apply_fill(rt, leg, fill_id, qty, Decimal(str(price)), ts_ms, side)
+
+
+def test_entry_request_sizes_approves_and_submits(tmp_path):
+    s, rt = _trading_strategy(tmp_path)
+    s.on_bar(_bar("BTC", 0, 30_000.0))
+    s.on_bar(_bar("ETH", 0, 60_000.0))
+    assert rt.exec_state.phase == ExecutionPhase.ENTRY_PENDING
+    assert rt.entry_side == -1 and rt.entry_beta == 1.0
+    kinds = [(leg, side) for _, leg, side, _, _ in s.submitted]
+    assert kinds == [("Y", -1), ("X", 1)]          # short spread: sell Y, buy X
+    assert len(s.submitted) == 2
+
+
+def test_fills_open_position_and_fills_close_trade(tmp_path):
+    s, rt = _trading_strategy(tmp_path, funding_dir=_funding_dir(tmp_path))
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    s._apply_fill(rt, "Y", "f1", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60000)), HOUR_MS, -1)
+    s._apply_fill(rt, "X", "f2", rt.exec_state.legs["X"].target_quantity, Decimal(str(30000)), HOUR_MS, 1)
+    assert rt.exec_state.phase == ExecutionPhase.OPEN
+    rt.kf = _StubFilter([1.0, 0.1])                 # h=8h no exit; h=9h back inside band
+    s.on_bar(_bar("BTC", 8 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 8 * HOUR_MS, 60_000.0))
+    assert rt.funding_obs and len(rt.funding_obs) == 2   # accrued at the 8h stamp
+    s.on_bar(_bar("BTC", 9 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 9 * HOUR_MS, 60_000.0))
+    assert rt.exec_state.phase == ExecutionPhase.EXIT_PENDING
+    s._apply_fill(rt, "Y", "f3", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60100)), 9 * HOUR_MS, 1)
+    s._apply_fill(rt, "X", "f4", rt.exec_state.legs["X"].target_quantity, Decimal(str(30050)), 9 * HOUR_MS, -1)
+    assert rt.exec_state.phase == ExecutionPhase.CLOSED
+    record = s._trade_records[-1]
+    assert record["reason"] == "EXIT_MEAN"
+    assert record["cost"] is not None and record["cost"].total_usdt > 0
+    assert record["cost_error"] is None
+    assert rt.entry_side == 0
+
+
+def test_risk_rejection_blocks_entry(tmp_path):
+    s, rt = _trading_strategy(tmp_path)
+    s._realized_pnl_usdt = -10_000.0               # equity <= 0 -> MISSING_DATA
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    assert s.submitted == []
+    assert rt.entry_side == 0
+
+
+def test_missing_funding_fails_cost_closed(tmp_path):
+    s, rt = _trading_strategy(tmp_path)
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    s._apply_fill(rt, "Y", "f1", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60000)), HOUR_MS, -1)
+    s._apply_fill(rt, "X", "f2", rt.exec_state.legs["X"].target_quantity, Decimal(str(30000)), HOUR_MS, 1)
+    rt.kf = _StubFilter([0.1])
+    s.on_bar(_bar("BTC", 9 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 9 * HOUR_MS, 60_000.0))
+    s._apply_fill(rt, "Y", "f3", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60100)), 9 * HOUR_MS, 1)
+    s._apply_fill(rt, "X", "f4", rt.exec_state.legs["X"].target_quantity, Decimal(str(30050)), 9 * HOUR_MS, -1)
+    assert s._trade_records[-1]["cost_error"] is not None
+    assert s._trade_records[-1]["cost"] is None
+
+
+def test_timeout_rolls_back_pending_entry(tmp_path):
+    s, rt = _trading_strategy(tmp_path, leg_timeout_hours=1.0)
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    assert rt.exec_state.phase == ExecutionPhase.ENTRY_PENDING
+    rt.kf = _StubFilter([0.5])
+    # next bar is past the 1h deadline with no fills
+    s.on_bar(_bar("BTC", 2 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 2 * HOUR_MS, 60_000.0))
+    assert rt.exec_state.phase == ExecutionPhase.IDLE
+    assert len(s.cancelled) == 2
+    assert rt.entry_side == 0                      # optimistic side reset on rollback
