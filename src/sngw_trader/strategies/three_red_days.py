@@ -15,6 +15,7 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.trading import Strategy
 
 from sngw_trader.indicators.bar_aggregator import NS, BarAggregator
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 DAY_NS = 86_400 * NS
 SOURCE_NS = 60 * NS
@@ -44,6 +45,7 @@ class ThreeRedDaysConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     streak_len: int = 3
     hold_bars: int = 3
     close_positions_on_stop: bool = True
@@ -55,7 +57,7 @@ class OrderIntent:
     qty: Decimal
 
 
-class ThreeRedDays(Strategy):
+class ThreeRedDays(NavFractionMixin, Strategy):
     def __init__(self, config: ThreeRedDaysConfig) -> None:
         super().__init__(config)
         self._daily = BarAggregator(86_400)
@@ -63,6 +65,7 @@ class ThreeRedDays(Strategy):
         self._in_position = False
         self._entry_bucket: int | None = None
         self._signed_qty = Decimal("0")
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -73,6 +76,7 @@ class ThreeRedDays(Strategy):
 
     def on_bar(self, bar: Bar) -> None:
         ts = int(bar.ts_init)
+        self._last_close = bar.close.as_double()
         for intent in self._on_1m(
             ts,
             bar.open.as_double(),
@@ -101,8 +105,17 @@ class ThreeRedDays(Strategy):
             )
         return intents
 
+    def _unit(self) -> Decimal:
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            self.log.warning("unit_qty unavailable; skipping order")
+        return unit
+
     def _sell_qty(self) -> Decimal:
-        return abs(self._signed_qty) if self._signed_qty != 0 else self.config.trade_size
+        if self._signed_qty != 0:
+            return abs(self._signed_qty)
+        unit = self._unit()
+        return unit if unit is not None else Decimal("0")
 
     def _clear_position(self) -> None:
         self._in_position = False
@@ -139,7 +152,9 @@ class ThreeRedDays(Strategy):
             and not self._in_position
             and self._streak == self.config.streak_len
         ):
-            qty = self.config.trade_size
+            qty = self._unit()
+            if qty is None:
+                return intents
             self._in_position = True
             self._entry_bucket = utc_bucket(now_ts_close_ns)
             intents.append(OrderIntent(1, qty))

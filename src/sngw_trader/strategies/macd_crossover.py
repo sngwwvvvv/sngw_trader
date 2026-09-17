@@ -6,7 +6,7 @@ Rules (strategy doc literal):
 - Exit / short: MACD line crosses below the signal line.
 - allow_short=True variant: the death cross opens a short instead of only
   closing; the golden cross flips back to long.
-- No take-profit / stop-loss / regime filter — the doc adds none.
+- No take-profit / stop-loss / regime filter ??the doc adds none.
 
 Sizing: the strategy doc leaves position sizing unconfirmed, so the default
 is unit qty (``sizing_mode="unit"``). A Harvey-style volatility-targeting
@@ -35,6 +35,7 @@ from nautilus_trader.trading import Strategy
 from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.indicators.kd_macd import Macd, crossed_down, crossed_up
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 _VALID_TRIGGERS = frozenset({"cross", "state"})
 _VALID_SIZING = frozenset({"unit", "vol_target"})
@@ -64,6 +65,7 @@ class MacdCrossoverConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -79,7 +81,7 @@ class MacdCrossoverConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class MacdCrossover(Strategy):
+class MacdCrossover(NavFractionMixin, Strategy):
     """MACD(12,26,9) crossover with unit or vol-target sizing.
 
     One UTC daily bar = one decision.
@@ -113,6 +115,7 @@ class MacdCrossover(Strategy):
         self._side: int = 0  # optimistic internal state; reconciled by on_event
         self._signed_qty: Decimal = Decimal("0")  # actual position qty from fills
         self._fills_signed_total: float = 0.0
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -127,6 +130,7 @@ class MacdCrossover(Strategy):
         h = bar.high.as_double()
         l = bar.low.as_double()
         c = bar.close.as_double()
+        self._last_close = bar.close.as_double()
         day = self._daily.update(ts, o, h, l, c)
         if day is None:
             return
@@ -167,7 +171,9 @@ class MacdCrossover(Strategy):
         return self._intents_for(target)
 
     def _intents_for(self, target: int) -> list[OrderIntent]:
-        unit = self.config.trade_size
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return []
         if self.config.sizing_mode == "unit":
             desired = Decimal("0") if target == 0 else Decimal(target) * unit
         else:
@@ -188,7 +194,7 @@ class MacdCrossover(Strategy):
         intents: list[OrderIntent] = []
         if current != 0 and (desired == 0 or (current > 0) != (desired > 0)):
             # close existing position first (NETTING-safe); qty = ACTUAL size,
-            # not side*unit — scaled adds make the position larger than unit.
+            # not side*unit ??scaled adds make the position larger than unit.
             intents.append(OrderIntent(-1 if current > 0 else 1, abs(current)))
             current = Decimal("0")
             self._side = 0

@@ -4,10 +4,10 @@ Paper literal (raw-trading-0005, arXiv:2206.12282, Table 8), long-only:
 - Buy:  VPVMA_t > (1 + bandwidth) * VPVMAS_t  and  VPVMA_{t-1} <= VPVMAS_{t-1}
 - Sell: VPVMA_t < (1 - 2*bandwidth) * VPVMAS_t  and  VPVMA_{t-1} <= VPVMAS_{t-1}
   (asymmetric bands, paper literal; prev condition written <= for both).
-- Params 12/26/9, bandwidth 0.1 — fixed, no optimization allowed.
+- Params 12/26/9, bandwidth 0.1 ??fixed, no optimization allowed.
 - allow_short=True variant: the Sell signal opens a short, the Buy signal
   flips back to long (repo convention; the paper itself is long-only).
-- No take-profit / stop-loss / regime filter — the paper adds none.
+- No take-profit / stop-loss / regime filter ??the paper adds none.
 
 Sizing: default unit qty (``sizing_mode="unit"``; the paper trades all-in
 per $80k stock). Vol-target variant (``sizing_mode="vol_target"``) is a
@@ -33,6 +33,7 @@ from nautilus_trader.trading import Strategy
 from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.indicators.vpvma import Vpvma as VpvmaIndicator
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 _VALID_SIZING = frozenset({"unit", "vol_target"})
 
@@ -72,6 +73,7 @@ class VpvmaConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     fast: int = 12
     slow: int = 26
     sign: int = 9
@@ -87,7 +89,7 @@ class VpvmaConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class Vpvma(Strategy):
+class Vpvma(NavFractionMixin, Strategy):
     """VPVMA(12,26,9, bw=0.1) band strategy with unit or vol-target sizing.
 
     One UTC daily bar = one decision.
@@ -114,6 +116,7 @@ class Vpvma(Strategy):
         self._prev_s: float | None = None
         self._side: int = 0  # optimistic internal state; reconciled by on_event
         self._signed_qty: Decimal = Decimal("0")  # actual position qty from fills
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -128,6 +131,7 @@ class Vpvma(Strategy):
         h = bar.high.as_double()
         l = bar.low.as_double()
         c = bar.close.as_double()
+        self._last_close = bar.close.as_double()
         day = self._daily.update(ts, o, h, l, c, bar.volume.as_double())
         if day is None:
             return
@@ -153,7 +157,9 @@ class Vpvma(Strategy):
         return self._intents_for(target)
 
     def _intents_for(self, target: int) -> list[OrderIntent]:
-        unit = self.config.trade_size
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return []
         if self.config.sizing_mode == "unit":
             desired = Decimal("0") if target == 0 else Decimal(target) * unit
         else:

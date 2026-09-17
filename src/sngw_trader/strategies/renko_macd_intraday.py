@@ -1,20 +1,20 @@
 """Renko + MACD intraday strategy (handoff 20260905-bt-renko-macd-intraday).
 
-Rules (spec §1 — strategy doc + stated assumptions):
+Rules (spec §1 ??strategy doc + stated assumptions):
 - Renko bricks are built from 1m bar closes (close-only convention: up needs
-  >= +B, direction flip needs 2B — see indicators/renko.py).
+  >= +B, direction flip needs 2B ??see indicators/renko.py).
 - MACD(12/26/9) on confirmed brick closes. Golden cross -> long entry,
   death cross -> exit (or short entry when allow_short). Signals fire on
   brick confirmation (1m bar close), time-independent.
 - Daily flatten: when flatten_daily=True, any open position is closed on the
   first bar of a new UTC day (overnight holds forbidden; NSE session-close
   proxy). Re-entry happens on the next signal.
-- No take-profit / stop-loss — the doc adds none.
+- No take-profit / stop-loss ??the doc adds none.
 - Sizing: unit qty default; vol-target variant as sensitivity only.
 
 Design follows macd_crossover.py: pure `_decide(brick_closes, force_flat)`
 returns OrderIntents; `_side` is optimistic state reconciled against fills
-in on_event. Strategy logic only — no runner assembly, no exchange I/O.
+in on_event. Strategy logic only ??no runner assembly, no exchange I/O.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from sngw_trader.indicators.kd_macd import Macd, crossed_down, crossed_up
 from sngw_trader.indicators.renko import RenkoBrickBuilder
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
 from sngw_trader.strategies.macd_crossover import OrderIntent, direction_target
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 _NS_DAY = 86_400 * 1_000_000_000
 _VALID_SIZING = frozenset({"unit", "vol_target"})
@@ -41,6 +42,7 @@ class RenkoMacdIntradayConfig(StrategyConfig, frozen=True):
     bar_type: BarType
     brick_pct: float  # brick size as a fraction of price (relative, spec §3)
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -56,7 +58,7 @@ class RenkoMacdIntradayConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class RenkoMacdIntraday(Strategy):
+class RenkoMacdIntraday(NavFractionMixin, Strategy):
     """MACD(12,26,9) crossover on Renko brick closes, daily-flattened."""
 
     def __init__(self, config: RenkoMacdIntradayConfig) -> None:
@@ -85,6 +87,7 @@ class RenkoMacdIntraday(Strategy):
         self._side: int = 0
         self._signed_qty: Decimal = Decimal("0")
         self._day: int | None = None  # UTC day bucket of the last seen bar
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -102,6 +105,7 @@ class RenkoMacdIntraday(Strategy):
         self._day = day
         close = bar.close.as_double()
         brick = close * self.config.brick_pct
+        self._last_close = bar.close.as_double()
         for b in self._renko.on_close(close, brick):
             for intent in self._decide(b, force_flat):
                 self._execute(intent)
@@ -128,7 +132,9 @@ class RenkoMacdIntraday(Strategy):
         return self._intents_for(target)
 
     def _intents_for(self, target: int) -> list[OrderIntent]:
-        unit = self.config.trade_size
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return []
         if self.config.sizing_mode == "unit":
             desired = Decimal("0") if target == 0 else Decimal(target) * unit
         else:

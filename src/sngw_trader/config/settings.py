@@ -67,6 +67,7 @@ class Settings:
     catalog_start: datetime | None
     catalog_end: datetime | None
     catalog_source: str = "okx"
+    size_nav_fraction: float = 1.0
     etf_symbols: str = "SPY,QQQ,IWM"
     instrument_id: str = ""
     oi_enabled: bool = False
@@ -159,6 +160,7 @@ strategy=_env("STRATEGY", "err_mom_a"),
         ema_slow=int(_env("EMA_SLOW", "50")),
         n_pull=int(_env("N_PULL", "24")),
         trade_size=_env("TRADE_SIZE", "0.01"),
+        size_nav_fraction=float(_env("SIZE_NAV_FRACTION", "1.0")),
         risk_stop_enabled=_env("RISK_STOP_ENABLED", "true").lower() in {"1", "true", "yes"},
         atr_period=int(_env("ATR_PERIOD", "14")),
         atr_mult=float(_env("ATR_MULT", "3")),
@@ -166,7 +168,7 @@ strategy=_env("STRATEGY", "err_mom_a"),
         size_target_vol=float(_env("SIZE_TARGET_VOL", "0.20")),
         size_half_life=int(_env("SIZE_HALF_LIFE", "20")),
         size_min_scale=float(_env("SIZE_MIN_SCALE", "0.0")),
-        size_max_scale=float(_env("SIZE_MAX_SCALE", "3.0")),
+        size_max_scale=float(_env("SIZE_MAX_SCALE", "5.0")),
         size_rebalance_band=float(_env("SIZE_REBALANCE_BAND", "0.10")),
         catalog_start=_optional_ts("CATALOG_START"),
         catalog_end=_optional_ts("CATALOG_END"),

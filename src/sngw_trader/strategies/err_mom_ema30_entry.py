@@ -1,4 +1,4 @@
-﻿"""Spec B: daily ERMOM regime permission + LTF (entry_tf_minutes) EMA20/50 band-reentry entry.
+"""Spec B: daily ERMOM regime permission + LTF (entry_tf_minutes) EMA20/50 band-reentry entry.
 
 Strategy logic only. Do not import TradingNode or OKX factories here.
 """
@@ -17,12 +17,14 @@ from sngw_trader.indicators.bar_aggregator import BarAggregator, CompletedBar
 from sngw_trader.indicators.err_momentum import ErrorAdjustedMomentum, regime_target
 from sngw_trader.indicators.risk_metrics import DailyAtr, Ema, is_stop_hit, stop_price
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 
 class ErrMomEma30EntryConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     w_f: int = 10
     w_e: int = 10
     momentum_window: int = 200
@@ -116,7 +118,7 @@ def should_exit(side: int, regime: int, close: float, ema_fast: float, ema_slow:
     return regime >= 0 or close > ema_slow or ema_fast >= ema_slow
 
 
-class ErrMomEma30Entry(Strategy):
+class ErrMomEma30Entry(NavFractionMixin, Strategy):
     def __init__(self, config: ErrMomEma30EntryConfig) -> None:
         super().__init__(config)
         self._daily = BarAggregator(86_400)
@@ -142,6 +144,7 @@ class ErrMomEma30Entry(Strategy):
         self._pending_atr: float | None = None
         self._active_direction = 0
         self._sized_this_bar = False
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -154,6 +157,7 @@ class ErrMomEma30Entry(Strategy):
         self._sized_this_bar = False
         ts = int(bar.ts_init)
         o, h, l, c = (bar.open.as_double(), bar.high.as_double(), bar.low.as_double(), bar.close.as_double())
+        self._last_close = bar.close.as_double()
         daily = self._daily.update(ts, o, h, l, c)  # daily first: fresh regime wins the 00:00 bar
         if daily is not None:
             self._ermom.update(daily.close)
@@ -222,7 +226,10 @@ class ErrMomEma30Entry(Strategy):
         self._short.reset()
 
     def _sync_size(self, direction: int, *, allow_new: bool, allow_resize: bool) -> None:
-        desired = self._sizer.desired_qty(direction, self.config.trade_size)
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return
+        desired = self._sizer.desired_qty(direction, unit)
         current = self._signed_qty()
         if desired is None:
             return

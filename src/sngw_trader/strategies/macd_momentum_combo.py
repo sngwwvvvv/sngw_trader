@@ -9,7 +9,7 @@ Rules (paper-verified):
   bars' momentum values >= upper threshold.
 - Long-only is the paper variant. allow_short=True is a user-approved
   direction-symmetric extension: the paper Sell condition opens a short and
-  the Buy condition flips back to long. NOT a paper rule — reported as such.
+  the Buy condition flips back to long. NOT a paper rule ??reported as such.
 - Default exits are opposite signals only (no TP/SL in the paper).
   use_bracket=True adds an ATR(14)×3 stop + 1:1 TP seeded at fill
   (sensitivity only, repo KD-MACD precedent).
@@ -41,6 +41,7 @@ from sngw_trader.indicators.kd_macd import Macd
 from sngw_trader.indicators.mfi import Mfi
 from sngw_trader.indicators.risk_metrics import DailyAtr, bracket_hit, stop_price
 from sngw_trader.indicators.rsi import Rsi
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 _VALID_MOMENTUM = frozenset({"rsi", "mfi"})
 
@@ -86,6 +87,7 @@ class MacdMomentumComboConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal  # unit qty (all_in=False cells); all-in ignores this
+    size_nav_fraction: float = 0.0
     momentum: str = "rsi"  # "rsi" (paper MACD&RSI) | "mfi" (paper MACD&MFI)
     allow_short: bool = False  # long-only is the paper variant
     all_in: bool = True  # paper sizing; False = fixed unit qty comparison cell
@@ -100,7 +102,7 @@ class MacdMomentumComboConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class MacdMomentumCombo(Strategy):
+class MacdMomentumCombo(NavFractionMixin, Strategy):
     """MACD + RSI/MFI combo. One UTC daily bar = one decision."""
 
     def __init__(self, config: MacdMomentumComboConfig) -> None:
@@ -123,6 +125,7 @@ class MacdMomentumCombo(Strategy):
         self._signed_qty: Decimal = Decimal("0")
         self._stop_price: float | None = None
         self._tp_price: float | None = None
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -145,6 +148,7 @@ class MacdMomentumCombo(Strategy):
                 self._side = 0
                 self._stop_price = None
                 self._tp_price = None
+        self._last_close = bar.close.as_double()
         day = self._daily.update(ts, o, h, l, c, bar.volume.as_double())
         if day is None:
             return
@@ -187,8 +191,11 @@ class MacdMomentumCombo(Strategy):
                 intents.append(OrderIntent(1 if target > 0 else -1, Decimal("0")))
             self._side = target
             return intents
-        # unit sizing: fixed trade_size, exact qty known here
-        desired = Decimal("0") if target == 0 else Decimal(target) * self.config.trade_size
+        # unit sizing: fixed trade_size (or NAV-fraction unit), exact qty known here
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return []
+        desired = Decimal("0") if target == 0 else Decimal(target) * unit
         current = self._signed_qty
         if current == desired:
             return []

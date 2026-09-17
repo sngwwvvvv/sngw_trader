@@ -4,7 +4,7 @@ One Strategy instance manages the 15-pair universe. Per pair: FORMATION
 (720 completed 1h mark bars) freezes x_center/x_scale plus the screen
 verdict, then TRADING (240 hours) trades spec §7.1 z-bands. Sizing, risk,
 execution, events, and realized costs delegate to S03/S04/S05/S06/S02.
-Strategy logic only — no runner assembly, no exchange I/O.
+Strategy logic only ??no runner assembly, no exchange I/O.
 """
 
 from __future__ import annotations
@@ -697,7 +697,7 @@ class KalmanSpreadStrategy(Strategy):
 
         Funding history is wired for accrual and realized-cost accounting
         (_accrue_funding / _finalize_trade); these formation-screen inputs
-        stay neutral 0 by design — using them is a documented Phase-2 ceiling.
+        stay neutral 0 by design ??using them is a documented Phase-2 ceiling.
         """
         return 0.0, 0
 
@@ -799,7 +799,7 @@ class KalmanSpreadStrategy(Strategy):
         bar = self._bars.get(InstrumentId.from_str(inst_id))
         if bar is None:
             raise ValueError(f"no mark yet for {inst_id}")
-        return float(bar.close.as_decimal())
+        return float(bar.close.as_double())
 
     def _half_spread_rate(self, inst_id: str) -> float:
         bps = self.config.btc_half_spread_bps if inst_id.startswith("BTC") else self.config.alt_half_spread_bps

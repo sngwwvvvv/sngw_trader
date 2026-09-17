@@ -17,12 +17,14 @@ from sngw_trader.indicators.bar_aggregator import BarAggregator, CompletedBar
 from sngw_trader.indicators.err_momentum import ErrorAdjustedMomentum, regime_target
 from sngw_trader.indicators.risk_metrics import DailyAtr, is_stop_hit, stop_price
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 
 class ErrMomentumRegimeConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     w_f: int = 5
     w_e: int = 5
     momentum_window: int = 48
@@ -52,7 +54,7 @@ def apply_entry_block(current: int, target: int, entry_blocked: bool) -> int:
     return current
 
 
-class ErrMomentumRegime(Strategy):
+class ErrMomentumRegime(NavFractionMixin, Strategy):
     def __init__(self, config: ErrMomentumRegimeConfig) -> None:
         super().__init__(config)
         self._daily = BarAggregator(14_400)
@@ -76,6 +78,7 @@ class ErrMomentumRegime(Strategy):
         self._low_water: float | None = None
         self._cooldown_bars = 0
         self._sized_this_bar = False
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -86,6 +89,7 @@ class ErrMomentumRegime(Strategy):
 
     def on_bar(self, bar: Bar) -> None:
         self._sized_this_bar = False
+        self._last_close = bar.close.as_double()
         exited = False
         side = self._current_side()
         if self._trailing(side, bar.high.as_double(), bar.low.as_double()):
@@ -178,7 +182,10 @@ class ErrMomentumRegime(Strategy):
         self._sync_size(target, allow_new=True, allow_resize=False)
 
     def _sync_size(self, direction: int, *, allow_new: bool, allow_resize: bool) -> None:
-        desired = self._sizer.desired_qty(direction, self.config.trade_size)
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return
+        desired = self._sizer.desired_qty(direction, unit)
         current = self._signed_qty()
         if desired is None:
             return

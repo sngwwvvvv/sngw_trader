@@ -12,6 +12,7 @@ from nautilus_trader.trading import Strategy
 from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.indicators.risk_metrics import Ema
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 DAY_NS = 86_400 * 1_000_000_000
 
@@ -36,6 +37,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     fast_ema_period: int = 20
     slow_ema_period: int = 50
     sizing_mode: str = "vol_target"
@@ -47,7 +49,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class EMACross(Strategy):
+class EMACross(NavFractionMixin, Strategy):
     def __init__(self, config: EMACrossConfig) -> None:
         super().__init__(config)
         self._fourh = BarAggregator(14_400)
@@ -68,6 +70,7 @@ class EMACross(Strategy):
         self._direction = 0
         self._daily_updates = 0
         self._sized_this_bar = False
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -80,6 +83,7 @@ class EMACross(Strategy):
         self._sized_this_bar = False
         ts = int(bar.ts_init)
         o, h, l, c = (x.as_double() for x in (bar.open, bar.high, bar.low, bar.close))
+        self._last_close = bar.close.as_double()
 
         utc_day = self._utc_day.update(ts, o, h, l, c)
         if utc_day is not None and utc_day.ts_open_ns % DAY_NS == 0:
@@ -105,7 +109,10 @@ class EMACross(Strategy):
         return Decimal(str(self.portfolio.net_position(self.config.instrument_id)))
 
     def _sync_size(self, direction: int, *, allow_resize: bool) -> None:
-        desired = self._sizer.desired_qty(direction, self.config.trade_size)
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return
+        desired = self._sizer.desired_qty(direction, unit)
         if desired is None:
             return
         current = self._signed_qty()

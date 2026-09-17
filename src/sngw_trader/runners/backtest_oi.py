@@ -53,6 +53,7 @@ def build_oi_strategy(settings: Settings) -> Strategy:
         "instrument_id": InstrumentId.from_str(instrument_id),
         "bar_type": oi_bar_type(instrument_id),
         "trade_size": Decimal(settings.trade_size),
+        "size_nav_fraction": settings.size_nav_fraction,
         "oi_client_id": "BACKTEST",
     }
     if settings.oi_strategy == "oi_a":

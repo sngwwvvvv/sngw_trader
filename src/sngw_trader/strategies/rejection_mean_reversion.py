@@ -25,6 +25,7 @@ from sngw_trader.indicators.oi_mean_reversion import (
 )
 from sngw_trader.indicators.volume_mean_reversion import is_rejection
 from sngw_trader.strategies.oi_order_lifecycle import handle_order_failure, request_flatten
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 
 @dataclass
@@ -38,6 +39,7 @@ class RejectionMeanReversionConfig(StrategyConfig, frozen=True, kw_only=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     bb_period: int = 20
     bb_std: float = 2.0
     atr_period: int = 14
@@ -54,7 +56,7 @@ class RejectionMeanReversionConfig(StrategyConfig, frozen=True, kw_only=True):
     hold_across_sessions: bool = False
 
 
-class RejectionMeanReversion(Strategy):
+class RejectionMeanReversion(NavFractionMixin, Strategy):
     """Price-band breach plus a rejection wick, then re-entry cross."""
 
     def __init__(self, config: RejectionMeanReversionConfig) -> None:
@@ -86,6 +88,7 @@ class RejectionMeanReversion(Strategy):
         self._stop_order_id = None
         self._target_order_id = None
         self._signed_qty = Decimal("0")
+        self._last_close: Decimal | None = None
         self._session_date: date | None = None
         self._session_trade_count = 0
         self._force_flat_date: date | None = None
@@ -113,6 +116,7 @@ class RejectionMeanReversion(Strategy):
         high = bar.high.as_double()
         low = bar.low.as_double()
         close = bar.close.as_double()
+        self._last_close = bar.close.as_double()
         self._bb.update_raw(high, low, close)
         self._atr.update_raw(high, low, close)
 
@@ -256,7 +260,10 @@ class RejectionMeanReversion(Strategy):
         instrument = self._instrument()
         if instrument is None:
             return
-        quantity = instrument.make_qty(self.config.trade_size)
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return
+        quantity = instrument.make_qty(unit)
         if quantity == 0:
             return
         order = self.order_factory.market(

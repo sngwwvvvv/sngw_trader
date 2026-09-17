@@ -32,6 +32,7 @@ from sngw_trader.indicators.bar_aggregator import BarAggregator
 from sngw_trader.indicators.kd_macd import KdStochastic, Macd, crossed_down, crossed_up
 from sngw_trader.indicators.risk_metrics import DailyAtr, bracket_hit, stop_price
 from sngw_trader.indicators.vol_targeting import VolTargetConfig, VolTargetSizer
+from sngw_trader.strategies.sizing import NavFractionMixin
 
 _VALID_TRIGGERS = frozenset({"cross", "state"})
 
@@ -77,6 +78,7 @@ class KdMacdCryptoConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
+    size_nav_fraction: float = 0.0
     kd_n: int = 9
     kd_alpha: float = 0.5
     macd_fast: int = 12
@@ -96,7 +98,7 @@ class KdMacdCryptoConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class KdMacdCrypto(Strategy):
+class KdMacdCrypto(NavFractionMixin, Strategy):
     """KD-MACD combo with vol-target sizing. One UTC daily bar = one decision."""
 
     def __init__(self, config: KdMacdCryptoConfig) -> None:
@@ -129,6 +131,7 @@ class KdMacdCrypto(Strategy):
         self._stop_price: float | None = None
         self._tp_price: float | None = None
         self._sized_this_bar = False
+        self._last_close: Decimal | None = None
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
@@ -144,6 +147,7 @@ class KdMacdCrypto(Strategy):
         h = bar.high.as_double()
         l = bar.low.as_double()
         c = bar.close.as_double()
+        self._last_close = bar.close.as_double()
         exited = False
         bracket = self._bracket_intent(h, l)
         if bracket is not None:
@@ -217,12 +221,15 @@ class KdMacdCrypto(Strategy):
         return (raw / step).to_integral_value(rounding="ROUND_HALF_UP") * step
 
     def _intents_for(self, target: int) -> list[OrderIntent]:
-        desired = self._sizer.desired_qty(target, self.config.trade_size)
+        unit = self.unit_qty(self.config, self._last_close)
+        if unit is None:
+            return []
+        desired = self._sizer.desired_qty(target, unit)
         step = Decimal(self.config.size_increment)
         if desired is None:
             # vol-target warmup: fall back to unit qty so signals still trade
             desired = (
-                Decimal("0") if target == 0 else Decimal(target) * self.config.trade_size
+                Decimal("0") if target == 0 else Decimal(target) * unit
             )
         else:
             desired = (desired / step).to_integral_value(rounding="ROUND_HALF_UP") * step
