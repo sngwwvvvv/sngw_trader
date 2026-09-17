@@ -13,6 +13,34 @@ import urllib.request
 from pathlib import Path
 
 FUNDING_URL = "https://www.okx.com/api/v5/public/funding-rate-history"
+BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+
+
+def fetch_funding_rates_proxy(inst_id: str, start_ms: int, end_ms: int) -> dict[int, float]:
+    """Binance USDT-M funding history as the deep-history proxy.
+
+    OKX only serves ~3 months of funding-rate-history; 2025 windows need
+    the same Binance-proxy pattern as the OI era scan. inst_id
+    'BTC-USDT-SWAP' -> Binance symbol 'BTCUSDT'."""
+    symbol = inst_id.replace("-USDT-SWAP", "USDT").replace("-USD-SWAP", "USD")
+    rates: dict[int, float] = {}
+    start = start_ms
+    while start <= end_ms:
+        url = (
+            f"{BINANCE_FUNDING_URL}?symbol={symbol}"
+            f"&startTime={start}&endTime={end_ms}&limit=1000"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rows = json.loads(resp.read())
+        if not rows:
+            break
+        for row in rows:
+            rates[int(row["fundingTime"])] = float(row["fundingRate"])
+        if len(rows) < 1000:
+            break
+        start = max(int(r["fundingTime"]) for r in rows) + 1
+    return dict(sorted(rates.items()))
 
 
 def fetch_funding_rates(inst_id: str, start_ms: int, end_ms: int) -> dict[int, float]:
@@ -21,7 +49,8 @@ def fetch_funding_rates(inst_id: str, start_ms: int, end_ms: int) -> dict[int, f
     after = end_ms + 1
     while True:
         url = f"{FUNDING_URL}?instId={inst_id}&after={after}&limit=100"
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
             rows = json.loads(resp.read())["data"]
         if not rows:
             break

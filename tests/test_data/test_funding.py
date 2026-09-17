@@ -63,3 +63,35 @@ def test_parse_fills_accepts_report_dataframe_records():
     fills = parse_fills(rows)
     assert fills[0] == (int(pd.Timestamp("2020-03-23 11:01:00+00:00").value), 0.5, 100.0)
     assert fills[1] == (int(pd.Timestamp("2020-03-23 11:03:00+00:00").value), -0.2, 101.0)
+
+
+def test_fetch_funding_rates_proxy_parses_and_paginates(monkeypatch):
+    """Binance fundingRate proxy: symbol conversion, pagination, {ts_ms: rate}."""
+    import io
+    import json
+
+    import sngw_trader.data.funding as funding
+
+    calls: list[str] = []
+
+    def _page(rows):
+        return io.BytesIO(json.dumps(rows).encode())
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        calls.append(url)
+        assert "symbol=BTCUSDT" in url
+        if len(calls) == 1:
+            # full page -> paginate
+            return _page([
+                {"fundingTime": 1_700_000_000_000 + i * 1000, "fundingRate": "0.0001"}
+                for i in range(1000)
+            ])
+        return _page([{"fundingTime": 1_700_096_000_000, "fundingRate": "0.0002"}])
+
+    monkeypatch.setattr(funding.urllib.request, "urlopen", fake_urlopen)
+    rates = funding.fetch_funding_rates_proxy("BTC-USDT-SWAP", 1_700_000_000_000, 1_700_096_000_000)
+    assert len(calls) == 2
+    assert rates[1_700_000_000_000] == 0.0001
+    assert rates[1_700_096_000_000] == 0.0002
+    assert list(rates) == sorted(rates)
