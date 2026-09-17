@@ -11,6 +11,7 @@ from sngw_trader.research.executor import (
     extract_analyzer_equity_marks,
     extract_fills,
     extract_run_result,
+    run_oi_window,
 )
 
 SPEC = GridSpec(
@@ -204,7 +205,8 @@ def test_run_oi_window_wires_oi_strategy_and_data(monkeypatch, tmp_path):
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     result = ex.run_oi_window(
-        str(tmp_path), "BTC-USDT-SWAP.OKX", settings=SimpleNamespace(),
+        str(tmp_path), "BTC-USDT-SWAP.OKX",
+        settings=SimpleNamespace(instrument_id_str="BTC-USDT-SWAP.OKX"),
         spec=OI_SPEC, params={}, start=start,
         end=datetime(2026, 2, 1, tzinfo=timezone.utc), warmup_days=1,
     )
@@ -217,3 +219,16 @@ def test_run_oi_window_wires_oi_strategy_and_data(monkeypatch, tmp_path):
     instrument_id, start_ns, end_ns = attached["args"]
     assert instrument_id == "BTC-USDT-SWAP.OKX"
     assert start_ns == int(start.timestamp() * 1_000_000_000) - 86_400_000_000_000
+
+
+def test_run_oi_window_rejects_instrument_mismatch(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="does not match settings"):
+        run_oi_window(
+            str(tmp_path), "ETH-USDT-SWAP.OKX",
+            settings=SimpleNamespace(instrument_id_str="BTC-USDT-SWAP.OKX"),
+            spec=SPEC, params={},
+            start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )

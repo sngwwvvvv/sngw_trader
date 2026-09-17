@@ -67,6 +67,25 @@ def test_scan_skips_corrupt_days_and_resumes_5m() -> None:
     assert [p.ts_event for p in points] == sorted(p.ts_event for p in points)
 
 
+def test_scan_skips_malformed_row_day_and_resumes_5m() -> None:
+    # valid header, malformed row (non-numeric open_interest) -> parse raises
+    bad = _csv(
+        "2023-06-02 00:00:00,BTCUSDT,not-a-number,1.0",
+        "2023-06-02 00:05:00,BTCUSDT,1.1,1.1",
+    )
+    days = {
+        date(2023, 6, 1): _five_minute_csv("2023-06-01"),
+        date(2023, 6, 2): bad,
+        date(2023, 6, 3): _five_minute_csv("2023-06-03"),
+    }
+    points, era_end = scan_binance_oi(date(2023, 6, 1), date(2023, 6, 3), fetch=days.get)
+    assert era_end == date(2023, 6, 4)
+    assert len(points) == 6
+    assert all(p.ts_event < int(datetime(2023, 6, 2, tzinfo=timezone.utc).timestamp() * 1e9)
+               or p.ts_event >= int(datetime(2023, 6, 3, tzinfo=timezone.utc).timestamp() * 1e9)
+               for p in points)
+
+
 def test_scan_stops_at_era_end_and_dedupes() -> None:
     days = {
         date(2023, 5, 31): _five_minute_csv("2023-05-31"),

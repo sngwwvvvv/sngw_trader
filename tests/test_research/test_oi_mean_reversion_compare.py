@@ -118,6 +118,25 @@ def test_run_compare_skips_window_without_eligible_params(monkeypatch, tmp_path)
     assert per_a["windows"][0]["oos"]["n_trades"] is None
 
 
+def test_funding_rates_cached_uses_binance_proxy(monkeypatch):
+    import sngw_trader.research.oi_mean_reversion_compare as cmp
+
+    called = {}
+    def fake_proxy(inst, s, e):
+        called["args"] = (inst, s, e)
+        return {1: 0.0001}
+
+    monkeypatch.setattr(cmp, "fetch_funding_rates_proxy", fake_proxy)
+    cmp._RATES_CACHE.clear()
+    rates = cmp._funding_rates_cached("BTC-USDT-SWAP", 1_000_000_000, 2_000_000_000)
+    assert called["args"] == ("BTC-USDT-SWAP", 1_000, 2_000)
+    assert rates == {1: 0.0001}
+    # second call hits cache (proxy not re-fetched)
+    monkeypatch.setattr(cmp, "fetch_funding_rates_proxy", lambda *a: {2: 0.0})
+    assert cmp._funding_rates_cached("BTC-USDT-SWAP", 1_000_000_000, 2_000_000_000) == {1: 0.0001}
+    cmp._RATES_CACHE.clear()
+
+
 def test_trade_spans_partial_fills_and_multiple_trades():
     fills = [
         (1, 0.006, 100.0),   # 부분 진입

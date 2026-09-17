@@ -82,7 +82,11 @@ def scan_binance_oi(
     while day <= end:
         text = fetch(day)
         if text is not None:
-            day_points, interval = parse_metrics_csv(text)
+            try:
+                day_points, interval = parse_metrics_csv(text)
+            except Exception:
+                # ponytail: malformed row/header kills multi-hour scans; skip day, continue
+                day_points, interval = [], "corrupt"
             if interval != "5m":
                 saw_non_5m = True
             else:

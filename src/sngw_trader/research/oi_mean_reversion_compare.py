@@ -7,6 +7,7 @@ Grids live in SPECS below; adjust after the oneshot sanity run (Task 6).
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import is_dataclass, replace
 from datetime import datetime, timezone
 
@@ -15,7 +16,7 @@ from nautilus_trader.core.datetime import dt_to_unix_nanos
 from sngw_trader.config import load_settings
 from sngw_trader.data.funding import (
     apply_funding_to_marks,
-    fetch_funding_rates,
+    fetch_funding_rates_proxy,
     funding_cost,
 )
 from sngw_trader.data.open_interest import OI_INSTRUMENT_ID
@@ -43,7 +44,7 @@ ASSUMPTIONS = [
     "Binance 5m era 종료일 이전 구간만 사용한다 (25m era 제외)",
     "tp_mode=atr, hold_across_sessions=true 재설계 구조다. TP=진입가±tp_atr_mult×ATR, SL=진입가∓atr_mult×ATR, 세션 종료 청산 없음(주말 보유 가능)",
     "주말/격일 보유의 갭 슬리피지는 백테스트 체결 모델이 과소평가할 수 있다",
-    "펀딩비는 OKX 실측 funding-rate-history를 트레이드별 (진입, 청산] 구간에 귀속해 반영한다",
+    "펀딩비는 OKX 히스토리 깊이(~3개월) 한계로 Binance funding proxy를 전 구간에 사용한다 (OI proxy와 동일한 venue 근사)",
     "이 결과만으로 라이브 투입 근거로 삼지 않는다. 실측 OKX OI 축적 후 재검증한다",
 ]
 
@@ -76,9 +77,12 @@ _RATES_CACHE: dict[tuple[str, int, int], dict[int, float]] = {}
 
 
 def _funding_rates_cached(inst_id: str, start_ns: int, end_ns: int) -> dict[int, float]:
+    """Binance funding proxy for ALL windows — OKX history only reaches ~3 months."""
     key = (inst_id, start_ns, end_ns)
     if key not in _RATES_CACHE:
-        _RATES_CACHE[key] = fetch_funding_rates(inst_id, start_ns // 1_000_000, end_ns // 1_000_000)
+        _RATES_CACHE[key] = fetch_funding_rates_proxy(
+            inst_id, start_ns // 1_000_000, end_ns // 1_000_000
+        )
     return _RATES_CACHE[key]
 
 
@@ -387,6 +391,8 @@ def _env_flag(name: str) -> bool:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     settings = load_settings()
     if settings.instrument_id_str != OI_INSTRUMENT_ID:
         raise SystemExit(f"OI compare supports only {OI_INSTRUMENT_ID}, got {settings.instrument_id_str}")

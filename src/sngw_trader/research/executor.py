@@ -165,6 +165,10 @@ def run_oi_window(
     quiet: bool = True,
 ):
     """One OI backtest window: OKX 1m bars + custom OI points, BacktestNode runner."""
+    if instrument_id != settings.instrument_id_str:
+        raise ValueError(
+            f"run_oi_window instrument_id {instrument_id!r} does not match settings {settings.instrument_id_str!r}"
+        )
     run_config = build_oi_run_config(
         settings,
         start=start - timedelta(days=warmup_days),
