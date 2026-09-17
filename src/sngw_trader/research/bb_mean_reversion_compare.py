@@ -1,28 +1,35 @@
-"""IS-only benchmark comparison for BB mean-reversion and its volume variants.
+"""IS benchmark comparison for BB mean-reversion and its volume variants.
 
-Report is a fixed-period, default-param comparison table — the control
-(BB only) against volume/OI variants. Realized/total PnL and round-trip
-count only; no alpha decisions here.
+Each strategy (control + volume/OI variants) runs the same 9-cell TP/SL
+grid: sl atr_mult 2/3/4 x tp_atr_mult 1.5/2.5/4, ATR take-profit, and
+positions held across sessions. Funding cost is applied outside the
+engine from OKX funding-rate history (data/funding.py pattern).
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from itertools import product
 
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig, BacktestRunConfig
+from nautilus_trader.core.datetime import dt_to_unix_nanos
 from nautilus_trader.model import Bar, BarType
 
 from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
+from sngw_trader.data.funding import fetch_funding_rates_proxy, funding_cost
 from sngw_trader.research.config import GridSpec
-from sngw_trader.research.executor import build_strategy
+from sngw_trader.research.executor import build_strategy, extract_fills
 from sngw_trader.runners.backtest_okx import build_run_config
 
 INSTRUMENT_ID = "BTC-USDT-SWAP.OKX"
 START = datetime(2025, 1, 1, tzinfo=timezone.utc)
 END = datetime(2025, 12, 31, tzinfo=timezone.utc)
+
+SL_ATR_MULTS = (2.0, 3.0, 4.0)
+TP_ATR_MULTS = (1.5, 2.5, 4.0)
 
 SPECS = {
     "bb_benchmark": GridSpec(
@@ -82,6 +89,19 @@ def bb_bar_type(instrument_id: str) -> BarType:
     )
 
 
+def tp_sl_cells() -> list[dict[str, float]]:
+    """Hold-across-session ATR TP/SL grid: sl 2/3/4 x tp 1.5/2.5/4."""
+    return [
+        {
+            "tp_mode": "atr",
+            "hold_across_sessions": True,
+            "atr_mult": sl,
+            "tp_atr_mult": tp,
+        }
+        for sl, tp in product(SL_ATR_MULTS, TP_ATR_MULTS)
+    ]
+
+
 def build_bb_run_config(
     settings: Settings,
     start: datetime | None = None,
@@ -93,6 +113,7 @@ def build_bb_run_config(
         settings,
         start=start,
         end=end,
+        quiet=True,
     )
     data = BacktestDataConfig(
         data_cls=Bar,
@@ -110,14 +131,21 @@ def build_bb_run_config(
     )
 
 
-def run(spec: GridSpec, settings: Settings, start: datetime, end: datetime) -> dict:
+def run(
+    spec: GridSpec,
+    params: dict,
+    settings: Settings,
+    start: datetime,
+    end: datetime,
+    rates: dict[int, float],
+) -> dict:
     instrument_id = settings.instrument_id_str
     run_config = build_bb_run_config(settings, start=start, end=end)
     node = BacktestNode(configs=[run_config])
     node.build()
     engine = node.get_engine(run_config.id)
     engine.add_strategy(
-        build_strategy(spec, {}, instrument_id, str(bb_bar_type(instrument_id)))
+        build_strategy(spec, params, instrument_id, str(bb_bar_type(instrument_id)))
     )
     try:
         node.run()
@@ -127,8 +155,17 @@ def run(spec: GridSpec, settings: Settings, start: datetime, end: datetime) -> d
         ).InstrumentId.from_str(instrument_id)
         realized = portfolio.realized_pnl(iid).as_double()
         total = portfolio.total_pnl(iid).as_double()
-        fills = len(engine.trader.generate_order_fills_report())
-        return {"realized": realized, "total": total, "round_trips": fills // 2}
+        fills_report = engine.trader.generate_order_fills_report()
+        fills = extract_fills(fills_report, dt_to_unix_nanos(start))
+        # funding_cost returns a signed cost (positive = loss).
+        funding = funding_cost(fills, rates)
+        return {
+            "realized": realized,
+            "total": total,
+            "round_trips": len(fills_report) // 2,
+            "funding": funding,
+            "net": total - funding,
+        }
     finally:
         node.dispose()
 
@@ -137,13 +174,32 @@ def main() -> None:
     settings = load_settings()
     if not settings.instrument_id_str.endswith(".OKX"):
         raise SystemExit("BB benchmark supports OKX instruments only")
-    rows = {name: run(spec, settings, START, END) for name, spec in SPECS.items()}
+    inst_id = settings.instrument_id_str.split(".", 1)[0]
+    # OKX only serves ~3 months of funding history; use the Binance proxy.
+    rates = fetch_funding_rates_proxy(
+        inst_id, int(START.timestamp() * 1000), int(END.timestamp() * 1000)
+    )
+    print(f"funding points (Binance proxy): {len(rates)}")
 
-    print(f"{'strategy':<16} {'round_trips':>11} {'realized_pnl':>12} {'total_pnl':>10}")
-    for name, r in rows.items():
-        print(
-            f"{name:<16} {r['round_trips']:>11} {r['realized']:>12.2f} {r['total']:>10.2f}"
-        )
+    cells = tp_sl_cells()
+    rows = []
+    for name, spec in SPECS.items():
+        for cell in cells:
+            result = run(spec, cell, settings, START, END, rates)
+            rows.append(
+                {
+                    "strategy": name,
+                    "sl_atr_mult": cell["atr_mult"],
+                    "tp_atr_mult": cell["tp_atr_mult"],
+                    **result,
+                }
+            )
+            print(
+                f"{name:<16} sl={cell['atr_mult']:<4} tp={cell['tp_atr_mult']:<4} "
+                f"rt={result['round_trips']:>4} total={result['total']:>12.2f} "
+                f"funding={result['funding']:>10.2f} net={result['net']:>12.2f}"
+            )
+
     print(json.dumps(rows, indent=2))
 
 

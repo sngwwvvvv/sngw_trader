@@ -1,4 +1,5 @@
 from datetime import datetime
+import pytest
 from decimal import Decimal
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -257,3 +258,74 @@ def test_vr_on_bar_reentry_without_spike_drops_setup(monkeypatch):
     strategy.on_bar(_Bar(start + 22 * step, 100.0, volume=1.0))
     assert submitted == []
     assert strategy._pending_setup is None
+
+
+def test_atr_tp_long_target_is_fill_plus_mult_times_atr(monkeypatch):
+    strategy = make_strategy(tp_mode="atr", tp_atr_mult=1.5)
+    submitted = []
+    strategy._captured_atr = 2.0
+    strategy._captured_target = 105.0
+    strategy._instrument = lambda: SimpleNamespace(
+        make_price=lambda value: Decimal(str(value)),
+        make_qty=lambda value: Decimal(str(value)),
+    )
+    fake_factory = SimpleNamespace(
+        stop_market=lambda **kwargs: SimpleNamespace(
+            kind="stop", client_order_id="stop-1", **kwargs
+        ),
+        limit=lambda **kwargs: SimpleNamespace(
+            kind="limit", client_order_id="target-1", **kwargs
+        ),
+    )
+    monkeypatch.setattr(type(strategy), "order_factory", fake_factory, raising=False)
+    monkeypatch.setattr(strategy, "submit_order", submitted.append)
+
+    strategy._submit_bracket(fill_price=100.0, quantity=Decimal("0.01"), side=1)
+
+    assert submitted[1].price == Decimal("103.0")
+    assert submitted[0].trigger_price == Decimal("95.0")
+
+
+def test_atr_tp_short_target_is_fill_minus_mult_times_atr(monkeypatch):
+    strategy = make_strategy(tp_mode="atr", tp_atr_mult=1.5)
+    submitted = []
+    strategy._captured_atr = 2.0
+    strategy._captured_target = 105.0
+    strategy._instrument = lambda: SimpleNamespace(
+        make_price=lambda value: Decimal(str(value)),
+        make_qty=lambda value: Decimal(str(value)),
+    )
+    fake_factory = SimpleNamespace(
+        stop_market=lambda **kwargs: SimpleNamespace(
+            kind="stop", client_order_id="stop-1", **kwargs
+        ),
+        limit=lambda **kwargs: SimpleNamespace(
+            kind="limit", client_order_id="target-1", **kwargs
+        ),
+    )
+    monkeypatch.setattr(type(strategy), "order_factory", fake_factory, raising=False)
+    monkeypatch.setattr(strategy, "submit_order", submitted.append)
+
+    strategy._submit_bracket(fill_price=100.0, quantity=Decimal("0.01"), side=-1)
+
+    assert submitted[1].price == Decimal("97.0")
+    assert submitted[0].trigger_price == Decimal("105.0")
+
+
+def test_rejects_invalid_tp_mode():
+    with pytest.raises(ValueError, match="tp_mode"):
+        make_strategy(tp_mode="invalid")
+
+
+def test_hold_across_sessions_skips_force_flat_at_close(monkeypatch):
+    strategy = make_strategy(hold_across_sessions=True)
+    calls = []
+    monkeypatch.setattr(strategy, "cancel_all_orders", lambda instrument_id: calls.append("cancel"))
+    monkeypatch.setattr(strategy, "close_all_positions", lambda instrument_id: calls.append("close"))
+    strategy._pending_setup = SimpleNamespace()
+    close_ts = int(datetime(2026, 9, 21, 16, 0, tzinfo=NY).timestamp() * 1_000_000_000)
+
+    strategy.on_bar(_Bar(close_ts, 100.0))
+
+    assert strategy._pending_setup is not None
+    assert calls == []
