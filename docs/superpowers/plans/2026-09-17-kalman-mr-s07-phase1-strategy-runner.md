@@ -58,7 +58,7 @@ def _seeded_pair(n=720, seed=7):
     x, e = 30_000.0, 0.0
     y_px, x_px = [], []
     for _ in range(n):
-        x *= math.exp(rng.gauss(0.0, 0.01))
+        x *= math.exp(rng.gauss(0.0, 0.001))
         e = 0.9714 * e + rng.gauss(0.0, 0.001)
         y_px.append(x * math.exp(e))
         x_px.append(x)
@@ -99,7 +99,7 @@ def test_half_life_matches_ar1_coefficient():
 def test_screen_pair_passes_clean_pair():
     d = screen_pair(_stats(), "FACTOR", funding_corr=0.05, funding_one_sided_days=2)
     assert d.passed and d.soft_score >= 60
-    d = screen_pair(_stats(), "PEER", funding_corr=0.05, funding_one_sided_days=2)
+    d = screen_pair(_stats(sigma_e=0.005), "PEER", funding_corr=0.05, funding_one_sided_days=2)
     assert d.passed
 
 
@@ -133,7 +133,7 @@ def test_screen_pair_cost_multiplier_stress_fails():
 
 
 def test_screen_pair_soft_score_components():
-    weak = _stats(hl_hours=150.0, hurst=0.46, beta_iqr_ratio=0.3, sigma_e=0.002, sigma_u=0.01)
+    weak = _stats(hl_hours=150.0, hurst=0.46, beta_iqr_ratio=0.3, sigma_u=0.01)
     d = screen_pair(weak, "FACTOR", funding_corr=0.2, funding_one_sided_days=4)
     assert d.reasons == () and d.passed is (d.soft_score >= 60)
 ```
@@ -379,7 +379,7 @@ def screen_pair(
         reasons.append("COST_MULTIPLE")
     score = 0
     score += 25 if 24.0 <= stats.hl_hours <= 96.0 else 0
-    score += 20 if 2.0 * stats.sigma_e / c >= 5.0 else 0
+    score += 20 if 2.0 * stats.sigma_u / c >= 5.0 else 0
     score += 15 if stats.hurst <= 0.35 else 0
     score += 15 if stats.beta_iqr_ratio <= 0.15 else 0
     score += 10 if stats.jump45_count == 0 else 0
@@ -460,7 +460,7 @@ def _seeded_pair(n=720, seed=7):
     x, e = 30_000.0, 0.0
     y_px, x_px = [], []
     for _ in range(n):
-        x *= math.exp(rng.gauss(0.0, 0.01))
+        x *= math.exp(rng.gauss(0.0, 0.001))
         e = 0.9714 * e + rng.gauss(0.0, 0.001)
         y_px.append(x * math.exp(e))
         x_px.append(x)
@@ -515,7 +515,7 @@ def _drive_formation(s: KalmanSpreadStrategy, hours: int, start_ms: int) -> int:
     x = 30_000.0
     ts = start_ms
     for _ in range(hours):
-        x *= math.exp(rng.gauss(0.0, 0.01))
+        x *= math.exp(rng.gauss(0.0, 0.001))
         y = x * 2.0 * math.exp(rng.gauss(0.0, 0.01))
         s.on_bar(_bar("BTC", ts, x))
         s.on_bar(_bar("ETH", ts, y))
@@ -937,7 +937,7 @@ class KalmanSpreadStrategy(Strategy):
                 self._complete_formation(rt, ts_ms)
             return requests
         rt.hours += 1
-        gate = self._evaluate_gate(rt, ts_ms)
+        gate_allowed, gate = self._evaluate_gate(rt, ts_ms)
         if gate == EXIT_EMERGENCY:
             if rt.has_exposure:
                 requests.append(ExitRequest(spec.pair_id, "STOP_EVENT", True, ts_ms))
@@ -968,7 +968,7 @@ class KalmanSpreadStrategy(Strategy):
             elif abs(res.beta - rt.entry_beta) / abs(rt.entry_beta) >= spec.rehedge_frac:
                 requests.append(RehedgeRequest(spec.pair_id, res.beta, ts_ms))
         else:
-            request = self._entry_decision(rt, res, ts_ms, y_mark, x_mark)
+            request = self._entry_decision(rt, res, ts_ms, y_mark, x_mark, gate_allowed)
             if request is not None:
                 requests.append(request)
         rt.prev_z = z
@@ -992,9 +992,10 @@ class KalmanSpreadStrategy(Strategy):
             return ExitRequest(spec.pair_id, "STOP_TIME", False, ts_ms)
         return None
 
-    def _entry_decision(self, rt: _PairRuntime, res, ts_ms: int, y_mark: float, x_mark: float):
+    def _entry_decision(self, rt: _PairRuntime, res, ts_ms: int, y_mark: float,
+                        x_mark: float, gate_allowed: bool):
         spec = rt.spec
-        if rt.prev_z is None:
+        if not gate_allowed or rt.prev_z is None:
             return None
         if rt.exec_state.cooldown_deadline is not None and ts_ms / 1000.0 < rt.exec_state.cooldown_deadline:
             return None
@@ -1040,19 +1041,25 @@ class KalmanSpreadStrategy(Strategy):
         rt.entry_beta = None
         rt.entry_ts_ms = 0
 
-    def _evaluate_gate(self, rt: _PairRuntime, ts_ms: int) -> str:
-        """Return the worst exit action across both legs (EXIT_NONE when allowed)."""
+    def _evaluate_gate(self, rt: _PairRuntime, ts_ms: int) -> tuple[bool, str]:
+        """(entries_allowed, worst exit action) across both legs. With no
+        event feed configured (empty events_path) the gate is neutral: the
+        full curated stream is passed to S06 so per-symbol matching happens
+        inside evaluate_gate and pairs without events are not MISSING_STATE."""
+        if not self._events and not self.config.events_path:
+            return True, EXIT_NONE
         now_s = ts_ms / 1000.0
         last = rt.last_gate_check_s if rt.last_gate_check_s > 0 else now_s
         rt.last_gate_check_s = now_s
-        worst = EXIT_NONE
+        allowed, worst = True, EXIT_NONE
         for symbol in (rt.spec.y_symbol, rt.spec.x_symbol):
             decision = evaluate_gate(self._events, symbol, now_s, last, self._gate_limits)
+            allowed = allowed and decision.entries_allowed
             if decision.exit_action == EXIT_EMERGENCY:
-                return EXIT_EMERGENCY
+                return allowed, EXIT_EMERGENCY
             if decision.exit_action == EXIT_ORDERLY:
                 worst = EXIT_ORDERLY
-        return worst
+        return allowed, worst
 
     def _funding_screen_inputs(self, rt: _PairRuntime, ts_ms: int) -> tuple[float, int]:
         """(corr(dFunding, e), max one-sided days) over the formation window."""
