@@ -14,6 +14,12 @@ class _FakeOrder:
 
 class _FakeInstrument:
     quote_currency = USDT
+    multiplier = Quantity.from_int(1)
+
+
+class _FakeSwapInstrument:
+    quote_currency = USDT
+    multiplier = Quantity.from_str("0.01")
 
 
 def test_fee_model_taker_and_maker() -> None:
@@ -32,6 +38,18 @@ def test_fee_model_taker_and_maker() -> None:
         _FakeInstrument(),
     )
     assert maker.as_double() == 10 * 100.0 * 0.0002
+
+
+def test_fee_model_applies_swap_multiplier() -> None:
+    model = OkxRateFeeModel(OkxRateFeeModelConfig(maker_fee_rate=0.0002, taker_fee_rate=0.0005))
+    taker = model.get_commission(
+        _FakeOrder(OrderType.MARKET),
+        Quantity.from_str("0.01"),
+        Price.from_str("100.0"),
+        _FakeSwapInstrument(),
+    )
+    # 0.01 contracts * 0.01 BTC/contract * 100.0 * 0.0005
+    assert taker.as_double() == 0.01 * 0.01 * 100.0 * 0.0005
 
 
 def test_run_config_has_fill_fee_latency() -> None:

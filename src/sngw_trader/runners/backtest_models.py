@@ -40,7 +40,10 @@ class OkxRateFeeModel(FeeModel):
             rate = self.maker_fee_rate
         else:
             rate = self.taker_fee_rate
-        notional = fill_px.as_double() * fill_qty.as_double()
+        # OKX SWAP qty is in contracts: notional = qty * multiplier * px.
+        # multiplier is 1 for spot/equity instruments, so this is a no-op there.
+        multiplier = instrument.multiplier.as_double()
+        notional = fill_px.as_double() * fill_qty.as_double() * multiplier
         return Money(notional * rate, instrument.quote_currency)
 
 
@@ -48,16 +51,27 @@ def _selfcheck() -> None:
     from types import SimpleNamespace
 
     from nautilus_trader.model.currencies import USDT
+    from nautilus_trader.model.objects import Quantity
 
-    instrument = SimpleNamespace(quote_currency=USDT)
+    instrument = SimpleNamespace(
+        quote_currency=USDT, multiplier=Quantity.from_int(1)
+    )
     market = SimpleNamespace(order_type=OrderType.MARKET)
     limit = SimpleNamespace(order_type=OrderType.LIMIT)
+    swap_instrument = SimpleNamespace(
+        quote_currency=USDT, multiplier=Quantity.from_str("0.01")
+    )
     model = OkxRateFeeModel(OkxRateFeeModelConfig(maker_fee_rate=0.0002, taker_fee_rate=0.0005))
 
     fee = model.get_commission(market, Quantity.from_int(1), Price.from_str("100.0"), instrument)
     assert fee == Money(0.05, USDT), fee
     fee = model.get_commission(limit, Quantity.from_int(1), Price.from_str("100.0"), instrument)
     assert fee == Money(0.02, USDT), fee
+    # SWAP: 0.01 contracts * 0.01 BTC/contract * 100.0 * 0.0005
+    fee = model.get_commission(
+        market, Quantity.from_str("0.01"), Price.from_str("100.0"), swap_instrument
+    )
+    assert fee == Money(0.000005, USDT), fee
     print("ok")
 
 
