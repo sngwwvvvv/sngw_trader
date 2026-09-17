@@ -21,7 +21,11 @@ from sngw_trader.config import load_settings
 from sngw_trader.config.settings import Settings
 from sngw_trader.data.funding import fetch_funding_rates_proxy, funding_cost
 from sngw_trader.research.config import GridSpec
-from sngw_trader.research.executor import build_strategy, extract_fills
+from sngw_trader.research.executor import (
+    _collect_result,
+    build_strategy,
+    extract_fills,
+)
 from sngw_trader.runners.backtest_okx import build_run_config
 
 INSTRUMENT_ID = "BTC-USDT-SWAP.OKX"
@@ -83,9 +87,9 @@ SPECS = {
 }
 
 
-def bb_bar_type(instrument_id: str) -> BarType:
+def bb_bar_type(instrument_id: str, minutes: int = 5) -> BarType:
     return BarType.from_str(
-        f"{instrument_id}-5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+        f"{instrument_id}-{minutes}-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
     )
 
 
@@ -131,6 +135,30 @@ def build_bb_run_config(
     )
 
 
+def perf_metrics(
+    trade_pnls: list[float],
+    marks: list[tuple[int, float]],
+    years: float,
+) -> dict:
+    n = len(trade_pnls)
+    win_rate = sum(1 for p in trade_pnls if p > 0) / n if n else None
+    if len(marks) > 1:
+        equity = [m[1] for m in marks]
+        rets = [equity[i] / equity[i - 1] - 1.0 for i in range(1, len(equity))]
+        mean = sum(rets) / len(rets)
+        std = (sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+        sharpe = mean / std * 365.0**0.5 if std > 0 else None
+        peak = equity[0]
+        mdd = 0.0
+        for eq in equity:
+            peak = max(peak, eq)
+            mdd = max(mdd, (peak - eq) / peak)
+        car = (equity[-1] / equity[0]) ** (1.0 / years) - 1.0 if equity[0] > 0 else None
+    else:
+        sharpe = mdd = car = None
+    return {"win_rate": win_rate, "sharpe": sharpe, "mdd": mdd, "car": car}
+
+
 def run(
     spec: GridSpec,
     params: dict,
@@ -138,6 +166,7 @@ def run(
     start: datetime,
     end: datetime,
     rates: dict[int, float],
+    bar_minutes: int = 5,
 ) -> dict:
     instrument_id = settings.instrument_id_str
     run_config = build_bb_run_config(settings, start=start, end=end)
@@ -145,7 +174,9 @@ def run(
     node.build()
     engine = node.get_engine(run_config.id)
     engine.add_strategy(
-        build_strategy(spec, params, instrument_id, str(bb_bar_type(instrument_id)))
+        build_strategy(
+            spec, params, instrument_id, str(bb_bar_type(instrument_id, bar_minutes))
+        )
     )
     try:
         node.run()
@@ -159,12 +190,17 @@ def run(
         fills = extract_fills(fills_report, dt_to_unix_nanos(start))
         # funding_cost returns a signed cost (positive = loss).
         funding = funding_cost(fills, rates)
+        result = _collect_result(engine, start)
+        metrics = perf_metrics(
+            result.trade_pnls, result.equity_marks, (end - start).days / 365.25
+        )
         return {
             "realized": realized,
             "total": total,
             "round_trips": len(fills_report) // 2,
             "funding": funding,
             "net": total - funding,
+            **metrics,
         }
     finally:
         node.dispose()
