@@ -42,7 +42,7 @@ def build_strategy_config(cfg: dict) -> dict:
             "formation_hours": cfg["formation_hours"],
             "trading_hours": cfg["trading_hours"],
             "equity_usdt": cfg["equity_usdt"],
-            "taker_fee": cfg["taker_fee"] * cfg["cost_multiplier"],
+            "taker_fee": cfg["taker_fee"],   # raw; strategy and venue fee model each apply cost_multiplier
             "cost_multiplier": cfg["cost_multiplier"],
             "funding_dir": cfg["funding_dir"],
             "events_path": cfg["events_path"],

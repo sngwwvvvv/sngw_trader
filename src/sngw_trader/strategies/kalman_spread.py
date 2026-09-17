@@ -286,6 +286,9 @@ class KalmanSpreadStrategy(Strategy):
         cfg = self.config
         if rt.exec_state.phase not in (ExecutionPhase.IDLE, ExecutionPhase.CLOSED):
             return
+        if any(self._pairs[m].entry_side != 0 for m in rt.spec.mutex if m in self._pairs):
+            self.log.warning(f"pair {rt.spec.pair_id} entry dropped: mutex pair open")
+            return
         target_n = self._target_notional(rt, request.beta)
         if target_n is None:
             return
@@ -432,14 +435,16 @@ class KalmanSpreadStrategy(Strategy):
         else:
             reference = Decimal(str(rt.decision_marks.get(leg, float(price))))
             result = on_fill(rt.exec_state, FillObservation(leg, fill_id, qty, price, reference))
+        late = "PHASE_NOT_ACTIVE" in result.reasons and result.state is rt.exec_state
         rt.exec_state = result.state
         for intent in result.actions:   # e.g. slippage rollback: cancel/flatten siblings
             self._submit_intent(rt, intent, rt.entry_side)
-        if result.reasons == ("DUPLICATE_FILL",):
+        if result.reasons == ("DUPLICATE_FILL",) or late:
             return
+        signed_qty = self._signed_coin_qty(rt, leg, side, qty)
         inst_id = f"{rt.spec.y_symbol if leg == 'Y' else rt.spec.x_symbol}.OKX"
-        rt.trade_fills.append((leg, float(qty) * side, float(price)))
-        rt.s02_fills.append(Fill(leg, float(qty) * side, float(price),
+        rt.trade_fills.append((leg, signed_qty, float(price)))
+        rt.s02_fills.append(Fill(leg, signed_qty, float(price),
                                  self.config.taker_fee * self.config.cost_multiplier,
                                  self._half_spread_rate(inst_id)))
         if rt.exec_state.phase is ExecutionPhase.OPEN:
@@ -483,8 +488,9 @@ class KalmanSpreadStrategy(Strategy):
         legs["X"] = replace(x_leg, target_quantity=new_target, filled_quantity=new_filled,
                             status=LegStatus.FILLED)
         rt.exec_state = replace(rt.exec_state, legs=MappingProxyType(legs))
-        rt.trade_fills.append(("X", float(qty) * side, float(price)))
-        rt.s02_fills.append(Fill("X", float(qty) * side, float(price),
+        signed_qty = float(qty) * float(x_spec.ct_val) * side
+        rt.trade_fills.append(("X", signed_qty, float(price)))
+        rt.s02_fills.append(Fill("X", signed_qty, float(price),
                                  self.config.taker_fee * self.config.cost_multiplier,
                                  self._half_spread_rate(f"{rt.spec.x_symbol}.OKX")))
 
@@ -496,7 +502,20 @@ class KalmanSpreadStrategy(Strategy):
             if mapping is None:
                 return
             rt = self._pairs[mapping[0]]
-            result = on_order_failure(rt.exec_state, mapping[1])
+            leg = mapping[1]
+            if (rt.exec_state.phase is ExecutionPhase.FLATTENING
+                    and rt.exec_state.legs[leg].status is LegStatus.FLATTENING
+                    and self._leg_held(rt, leg) > 0):
+                # S05 on_order_failure ignores FLATTENING; a rejected flatten
+                # order must be resubmitted or the pair wedges.
+                side = -self._held_side(rt, leg)
+                held = self._leg_held(rt, leg)
+                self.log.warning(
+                    f"pair {rt.spec.pair_id} flatten order rejected on {leg}; resubmitting"
+                )
+                self._submit_market(rt, leg, side, held, self._next_coid(rt, leg))
+                return
+            result = on_order_failure(rt.exec_state, leg)
             rt.exec_state = result.state
             for intent in result.actions:
                 self._submit_intent(rt, intent, rt.entry_side)
@@ -536,6 +555,8 @@ class KalmanSpreadStrategy(Strategy):
         requests: list = []
         timeout_request = self._check_timeout(rt, now_s)
         if rt.phase == "FORMATION":
+            if rt.entry_side != 0:
+                self._accrue_funding(rt, ts_ms)   # exit still in flight across the reset
             rt.y_marks.append(y_mark)
             rt.x_marks.append(x_mark)
             rt.hours += 1
@@ -722,8 +743,9 @@ class KalmanSpreadStrategy(Strategy):
                 continue   # absent observation -> calculate_cost fails closed at close
             mark = self._last_mark(f"{symbol}.OKX")
             held_side = self._held_side(rt, leg)
+            ct_val = float(self._contract_spec(f"{symbol}.OKX").ct_val)
             rt.funding_obs.append(FundingObservation(
-                leg, ts_ms, float(self._leg_held(rt, leg)) * held_side, mark, rate))
+                leg, ts_ms, float(self._leg_held(rt, leg)) * ct_val * held_side, mark, rate))
 
     def _snapshot(self) -> PortfolioSnapshot:
         equity = Decimal(str(self._equity()))
@@ -848,6 +870,11 @@ class KalmanSpreadStrategy(Strategy):
                 asset = symbol.split("-")[0]
                 exposure[asset] = exposure.get(asset, Decimal("0")) + notional
         return exposure
+
+    def _signed_coin_qty(self, rt: _PairRuntime, leg: str, side: int, qty: Decimal) -> float:
+        """S03 sizes in contracts; S02/PnL accounting is in coin units."""
+        symbol = rt.spec.y_symbol if leg == "Y" else rt.spec.x_symbol
+        return float(qty) * float(self._contract_spec(f"{symbol}.OKX").ct_val) * side
 
     def _held_side(self, rt: _PairRuntime, leg: str) -> int:
         if rt.entry_side == 0:

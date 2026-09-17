@@ -26,6 +26,13 @@ from sngw_trader.research.kalman_walkforward import (
     build_strategy_config,
 )
 
+
+def test_build_strategy_config_passes_raw_taker_fee():
+    cfg = {**DEFAULT_CONFIG, "taker_fee": 0.0005, "cost_multiplier": 2.0}
+    strategy_cfg = build_strategy_config(cfg)["config"]
+    assert strategy_cfg["taker_fee"] == 0.0005   # raw; strategy applies cost_multiplier itself
+    assert strategy_cfg["cost_multiplier"] == 2.0
+
 IDS = ("ETH-USDT-SWAP.OKX", "BTC-USDT-SWAP.OKX")
 HOUR_MS = 3_600_000
 _RAW_SCALE = Decimal(10) ** 9   # Bar.from_raw takes 1e9-scaled fixed-point values

@@ -20,6 +20,7 @@ INSTRUMENT_IDS = ("ETH-USDT-SWAP.OKX", "BTC-USDT-SWAP.OKX")
 BAR_TYPES = {
     iid: BarType.from_str(f"{iid}-1-HOUR-MARK-EXTERNAL") for iid in INSTRUMENT_IDS
 }
+BAR_TYPES["SOL-USDT-SWAP.OKX"] = BarType.from_str("SOL-USDT-SWAP.OKX-1-HOUR-MARK-EXTERNAL")
 HOUR_MS = 3_600_000
 _RAW_SCALE = Decimal(10) ** 9   # Bar.from_raw takes 1e9-scaled fixed-point values
 
@@ -266,6 +267,24 @@ def test_mutex_pair_blocks_entry():
     assert [r for r in s._request_log if isinstance(r, EntryRequest)] == []
 
 
+def test_mutex_pairs_crossing_same_bar_only_one_enters(tmp_path):
+    s = _RecordingStrategy(config=_config(
+        instrument_ids=INSTRUMENT_IDS + ("SOL-USDT-SWAP.OKX",), pair_ids=(1, 9),
+        contract_specs_path=_specs_file(tmp_path)))
+    for rt in (s._pairs[1], s._pairs[9]):
+        rt.phase = "TRADING"
+        rt.kf = _StubFilter([0.5, 1.7])            # both cross on the same bar
+        rt.prev_z = 0.5
+        rt.sigma_u = 0.01
+        rt.hl_hours = 24.0
+    for ts in (0, HOUR_MS):
+        s.on_bar(_bar("BTC", ts, 30_000.0))
+        s.on_bar(_bar("ETH", ts, 60_000.0))
+        s.on_bar(_bar("SOL", ts, 100.0))
+    entered = [pid for pid in (1, 9) if s._pairs[pid].entry_side != 0]
+    assert entered == [1]                          # pair 9 mutexed by pair 1's open entry
+
+
 class _StubFilter:
     def __init__(self, z_values, beta=1.0):
         from sngw_trader.indicators.kalman_spread import KalmanSpreadResult
@@ -289,6 +308,7 @@ def _specs_file(tmp_path):
     specs = {
         "ETH-USDT-SWAP.OKX": {"ct_val": 0.1, "lot_sz": 0.001, "min_sz": 0.001, "price_precision": 2},
         "BTC-USDT-SWAP.OKX": {"ct_val": 0.001, "lot_sz": 0.001, "min_sz": 0.001, "price_precision": 2},
+        "SOL-USDT-SWAP.OKX": {"ct_val": 0.1, "lot_sz": 0.001, "min_sz": 0.001, "price_precision": 2},
     }
     p = tmp_path / "specs.json"
     p.write_text(_json.dumps(specs))
@@ -358,9 +378,14 @@ def test_fills_open_position_and_fills_close_trade(tmp_path):
     s._apply_fill(rt, "Y", "f1", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60000)), HOUR_MS, -1)
     s._apply_fill(rt, "X", "f2", rt.exec_state.legs["X"].target_quantity, Decimal(str(30000)), HOUR_MS, 1)
     assert rt.exec_state.phase == ExecutionPhase.OPEN
+    # S03 sizes in contracts; accounting quantities are coin units (ETH 0.1, BTC 0.001)
+    y_coin = float(rt.exec_state.legs["Y"].target_quantity) * 0.1
+    x_coin = float(rt.exec_state.legs["X"].target_quantity) * 0.001
     rt.kf = _StubFilter([1.0, 0.1])                 # h=8h no exit; h=9h back inside band
     s.on_bar(_bar("BTC", 8 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 8 * HOUR_MS, 60_000.0))
     assert rt.funding_obs and len(rt.funding_obs) == 2   # accrued at the 8h stamp
+    assert [o.signed_quantity for o in rt.funding_obs] == [
+        pytest.approx(-y_coin), pytest.approx(x_coin)]   # short Y / long X, in coin units
     s.on_bar(_bar("BTC", 9 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 9 * HOUR_MS, 60_000.0))
     assert rt.exec_state.phase == ExecutionPhase.EXIT_PENDING
     s._apply_fill(rt, "Y", "f3", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60100)), 9 * HOUR_MS, 1)
@@ -371,6 +396,10 @@ def test_fills_open_position_and_fills_close_trade(tmp_path):
     assert record["cost"] is not None and record["cost"].total_usdt > 0
     assert record["cost_error"] is None
     assert rt.entry_side == 0
+    # Hand-computed USDT pnl: sell Y@60000, buy X@30000, buy Y@60100, sell X@30050
+    expected_pnl = y_coin * 60000 - x_coin * 30000 - y_coin * 60100 + x_coin * 30050
+    assert record["pnl_usdt"] == pytest.approx(expected_pnl, abs=1.0)
+    assert record["cost"].total_usdt < 10
 
 
 def test_risk_rejection_blocks_entry(tmp_path):
@@ -457,7 +486,10 @@ def test_accrue_funding_during_exit_uses_held_qty(tmp_path):
         InstrumentId.from_str("BTC-USDT-SWAP.OKX"): _bar("BTC", 0, 30_000.0),
     }
     s._accrue_funding(rt, 8 * HOUR_MS)
-    assert [(o.leg, o.signed_quantity) for o in rt.funding_obs] == [("Y", -0.158), ("X", 31.666)]
+    assert [(o.leg, o.signed_quantity) for o in rt.funding_obs] == [
+        ("Y", pytest.approx(-0.0158)),   # 0.158 contracts * 0.1 ETH ct_val, short
+        ("X", pytest.approx(0.031666)),  # 31.666 contracts * 0.001 BTC ct_val, long
+    ]
 
 
 def test_emergency_during_entry_partial_flattens(tmp_path):
@@ -501,3 +533,70 @@ def test_rehedge_fill_guards(tmp_path):
     s._rehedge_coids.add("K01-X-100")
     s._on_order_filled(_StubFillEvent("K01-X-100", 1, 30000.0, 1))   # stale: not OPEN
     assert len([f for f in rt.trade_fills if f[0] == "X"]) == 1
+
+
+def _rejected_event(coid: str):
+    from nautilus_trader.core.uuid import UUID4
+    from nautilus_trader.model.events import OrderRejected
+    from nautilus_trader.model.identifiers import (
+        AccountId, ClientOrderId, InstrumentId, StrategyId, TraderId,
+    )
+
+    return OrderRejected(
+        trader_id=TraderId("TRADER-001"),
+        strategy_id=StrategyId("S-001"),
+        instrument_id=InstrumentId.from_str("ETH-USDT-SWAP.OKX"),
+        client_order_id=ClientOrderId(coid),
+        account_id=AccountId("OKX-001"),
+        reason="test reject",
+        event_id=UUID4(),
+        ts_event=0,
+        ts_init=0,
+    )
+
+
+def test_flatten_rejection_resubmits_flatten_order(tmp_path):
+    s = _RecordingStrategy(config=_config(contract_specs_path=_specs_file(tmp_path)))
+    rt = s._pairs[1]
+    rt.entry_side = -1                              # short spread: Y held short
+    rt.exec_state = ExecutionState(
+        phase=ExecutionPhase.FLATTENING,
+        legs={
+            "Y": LegState("Y", Decimal("0.208"), Decimal("0.208"), "K01-Y-1", LegStatus.FLATTENING),
+            "X": LegState("X", None, Decimal("0"), "K01-X-1", LegStatus.IDLE),
+        },
+    )
+    s._coid_legs["K01-Y-1"] = (1, "Y")              # registered when the order was submitted
+    s._order_seq = 1                                # the rejected flatten order consumed seq 1
+    s.on_event(_rejected_event("K01-Y-1"))          # flatten order rejected
+    assert len(s.submitted) == 1                    # S05 no-ops here; strategy must retry
+    pair_id, leg, side, qty, coid = s.submitted[0]
+    assert (pair_id, leg, side, qty) == (1, "Y", 1, "0.208")   # buy back the held short
+    assert coid == "K01-Y-2"
+
+
+def test_funding_accrues_during_formation_exit_in_flight(tmp_path):
+    s, rt = _trading_strategy(tmp_path, funding_dir=_funding_dir(tmp_path))
+    rt.phase = "FORMATION"                          # exit crossed the window reset
+    rt.entry_side = -1
+    rt.exec_state = ExecutionState(
+        phase=ExecutionPhase.EXIT_PENDING,
+        legs={
+            "Y": LegState("Y", Decimal("0.208"), Decimal("0.05"), None, LegStatus.PARTIAL),
+            "X": LegState("X", Decimal("41.666"), Decimal("10"), None, LegStatus.PARTIAL),
+        },
+    )
+    s.on_bar(_bar("BTC", 8 * HOUR_MS, 30_000.0)); s.on_bar(_bar("ETH", 8 * HOUR_MS, 60_000.0))
+    assert [(o.leg, o.signed_quantity) for o in rt.funding_obs] == [
+        ("Y", pytest.approx(-0.0158)), ("X", pytest.approx(0.031666))]
+
+
+def test_late_fill_after_phase_inactive_ignored(tmp_path):
+    s, rt = _trading_strategy(tmp_path)
+    s.on_bar(_bar("BTC", 0, 30_000.0)); s.on_bar(_bar("ETH", 0, 60_000.0))
+    s._apply_fill(rt, "Y", "f1", rt.exec_state.legs["Y"].target_quantity, Decimal(str(60000)), HOUR_MS, -1)
+    assert len(rt.trade_fills) == 1
+    rt.exec_state = ExecutionState()                # rolled back / closed elsewhere
+    s._apply_fill(rt, "X", "f2", Decimal("1"), Decimal(str(30000)), HOUR_MS, 1)
+    assert len(rt.trade_fills) == 1                 # late fill not booked
+    assert len(rt.s02_fills) == 1

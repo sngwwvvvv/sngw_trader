@@ -1,4 +1,6 @@
 from nautilus_trader.model import Bar, BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
 
 from sngw_trader.data.catalog_writer import raw_candle_to_bar, run_download
 from sngw_trader.runners.backtest_okx import default_bar_type
@@ -99,6 +101,39 @@ def test_download_mark_bars_paginates_and_sorts(monkeypatch):
     bars = cw.download_mark_bars(_settings_stub(), _instrument_stub(), "BTC-USDT-SWAP", "1H")
     assert [b.ts_init for b in bars] == sorted(b.ts_init for b in bars)
     assert len(bars) == 2
+
+
+def test_download_universe_mark_bars_labels_per_symbol(monkeypatch):
+    written: list[tuple] = []
+
+    class FakeCatalog:
+        def write_data(self, data, data_cls):
+            written.append((data_cls, list(data)))
+
+    def fake_instruments(settings):
+        return {
+            InstrumentId.from_str("ETH-USDT-SWAP.OKX"): _instrument_stub(),
+            InstrumentId.from_str("BTC-USDT-SWAP.OKX"): _instrument_stub(),
+        }
+
+    def fake_fetch(url, params):
+        assert "history-mark-price-candles" in url
+        return [["1700000000000", "1", "1", "1", "1", "1"]]
+
+    monkeypatch.setattr(cw, "load_all_instruments", fake_instruments)
+    monkeypatch.setattr(cw, "_fetch_okx", fake_fetch)
+    report = cw.download_universe_mark_bars(
+        _settings_stub(), FakeCatalog(), ["ETH-USDT-SWAP", "BTC-USDT-SWAP"]
+    )
+    bar_ids = {
+        str(b.bar_type.instrument_id)
+        for data_cls, data in written if data_cls is Bar
+        for b in data
+    }
+    assert bar_ids == {"ETH-USDT-SWAP.OKX", "BTC-USDT-SWAP.OKX"}
+    assert report["ETH-USDT-SWAP"]["n"] == 1 and report["BTC-USDT-SWAP"]["n"] == 1
+    instruments = [d for data_cls, d in written if data_cls is Instrument]
+    assert len(instruments) == 2   # one per symbol, written before its bars
 
 
 def test_write_funding_history_roundtrip(tmp_path, monkeypatch):

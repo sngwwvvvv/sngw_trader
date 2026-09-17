@@ -91,6 +91,19 @@ def load_instrument(settings: Settings) -> Instrument:
     return instruments[InstrumentId.from_str(settings.instrument_id_str)]
 
 
+def load_all_instruments(settings: Settings) -> dict:
+    """All OKX USDT-SWAP instruments keyed by InstrumentId."""
+    from nautilus_trader.adapters.okx import OKXInstrumentProvider
+    from nautilus_trader.core.nautilus_pyo3.okx import OKXInstrumentType
+
+    provider = OKXInstrumentProvider(
+        _okx_http_client(settings),
+        instrument_types=(OKXInstrumentType.SWAP,),
+    )
+    provider.load_all()
+    return provider.get_all()
+
+
 def _fetch_okx(url: str, params: dict) -> list[list[str]]:
     req = urllib.request.Request(
         url + "?" + urllib.parse.urlencode(params), headers={"User-Agent": "Mozilla/5.0"}
@@ -188,7 +201,7 @@ def download_mark_bars(settings: Settings, instrument: Instrument, symbol: str, 
         for raw in rows:
             ts_ms = int(raw[0])
             if start_ms <= ts_ms <= end_ms:
-                bars.append(raw_mark_candle_to_bar(raw, settings.instrument_id_str,
+                bars.append(raw_mark_candle_to_bar(raw, f"{symbol}.OKX",
                                                    instrument.price_precision, instrument.size_precision, bar))
         oldest = int(rows[-1][0])
         if oldest < start_ms or len(rows) < 100:
@@ -199,10 +212,14 @@ def download_mark_bars(settings: Settings, instrument: Instrument, symbol: str, 
 
 
 def download_universe_mark_bars(settings: Settings, catalog: ParquetDataCatalog, symbols, bar: str = "1H") -> dict:
-    instrument = load_instrument(settings)
-    catalog.write_data([instrument], data_cls=Instrument)
+    instruments = load_all_instruments(settings)
     report: dict = {}
     for symbol in symbols:
+        inst_id = InstrumentId.from_str(f"{symbol}.OKX")
+        instrument = instruments.get(inst_id)
+        if instrument is None:
+            raise ValueError(f"no OKX SWAP instrument for {inst_id}")
+        catalog.write_data([instrument], data_cls=Instrument)
         bars = download_mark_bars(settings, instrument, symbol, bar)
         if not bars:
             report[symbol] = {"n": 0, "first": None, "last": None}
