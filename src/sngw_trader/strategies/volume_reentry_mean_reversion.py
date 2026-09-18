@@ -7,13 +7,19 @@ dropped. Confirms the counter-flow is real instead of drift.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from nautilus_trader.config import StrategyConfig
-from nautilus_trader.indicators import AverageTrueRange, BollingerBands, MovingAverageType
+from nautilus_trader.indicators import (
+    AverageTrueRange,
+    BollingerBands,
+    ExponentialMovingAverage,
+    MovingAverageType,
+)
 from nautilus_trader.model import Bar, BarType, InstrumentId
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled
@@ -55,6 +61,18 @@ class VolumeReentryMeanReversionConfig(StrategyConfig, frozen=True, kw_only=True
     tp_mode: str = "band"  # "band": opposite BB band (spec 2026-09-16) | "atr": fill ± tp_atr_mult * ATR
     tp_atr_mult: float = 2.0
     hold_across_sessions: bool = False
+    # HTF regime filter: None = off. E.g. "BTC-USDT-SWAP.OKX-4-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL".
+    regime_bar_type: str | None = None
+    regime_ema_period: int = 20
+    # Exit combo (spec 2026-09-18). regime_exit_buffer: None = off (hold through flip,
+    # current behavior) | 0.0 = opposite-side 4H close liquidates | >0 = neutral band
+    # in buffer * ATR(4H) where the side neither flips nor exits.
+    regime_exit_buffer: float | None = None
+    # Chandelier trail: None = off. 4H ATR when regime is on, else 30m ATR.
+    chandelier_k: float | None = None
+    chandelier_lookback: int = 22
+    # Time stop: None = off. Unconditional liquidation after N in-session 30m bars.
+    time_stop_bars: int | None = None
 
 
 class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
@@ -73,6 +91,30 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
         self._tz = ZoneInfo(config.session_timezone)
         self._session_start = _parse_clock(config.session_start)
         self._session_end = _parse_clock(config.session_end)
+        self._regime_bar_type = (
+            BarType.from_str(config.regime_bar_type)
+            if config.regime_bar_type
+            else None
+        )
+        self._regime_ema = (
+            ExponentialMovingAverage(config.regime_ema_period)
+            if self._regime_bar_type is not None
+            else None
+        )
+        self._regime_atr = (
+            AverageTrueRange(
+                config.atr_period,
+                MovingAverageType.WILDER,
+                use_previous=True,
+            )
+            if self._regime_bar_type is not None
+            else None
+        )
+        self._regime_side: int | None = None
+        self._trail: deque[float] = deque(maxlen=config.chandelier_lookback)
+        self._exit_requested = False
+        self._bars_held = 0
+        self._stop_trigger: float | None = None
         self._volumes: list[float] = []
         self._pending_setup: _PendingSetup | None = None
         self._captured_atr: float | None = None
@@ -100,6 +142,8 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
 
     def on_start(self) -> None:
         self.subscribe_bars(self.config.bar_type)
+        if self._regime_bar_type is not None:
+            self.subscribe_bars(self._regime_bar_type)
 
     def on_stop(self) -> None:
         self.cancel_all_orders(self.config.instrument_id)
@@ -107,6 +151,39 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
             self.close_all_positions(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
+        if (
+            self._regime_bar_type is not None
+            and bar_type_matches(bar.bar_type, self._regime_bar_type)
+        ):
+            close = bar.close.as_double()
+            high = bar.high.as_double()
+            low = bar.low.as_double()
+            self._regime_ema.update_raw(close)
+            if self._regime_atr is not None:
+                self._regime_atr.update_raw(high, low, close)
+            if self._regime_ema.initialized:
+                new_side = 1 if close >= float(self._regime_ema.value) else -1
+                in_band = False
+                if (
+                    self.config.regime_exit_buffer is not None
+                    and self._regime_atr is not None
+                    and self._regime_atr.initialized
+                ):
+                    in_band = (
+                        abs(close - float(self._regime_ema.value))
+                        < self.config.regime_exit_buffer * float(self._regime_atr.value)
+                    )
+                if not in_band or self._regime_side is None:
+                    self._regime_side = new_side
+                if (
+                    self.config.regime_exit_buffer is not None
+                    and self._signed_qty != 0
+                    and self._entry_side is not None
+                    and self._regime_side != self._entry_side
+                ):
+                    self._liquidate()
+            return
+
         if not bar_type_matches(bar.bar_type, self.config.bar_type):
             return
 
@@ -138,6 +215,11 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
         upper = float(self._bb.upper)
         atr = float(self._atr.value)
 
+        if self._signed_qty != 0:
+            self._update_exits(high=high, low=low, atr=atr)
+            if self._exit_requested:
+                return
+
         if self._pending_setup is not None:
             self._process_pending(
                 close=close,
@@ -151,10 +233,59 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
 
         if not self._can_submit_entry(local_dt):
             return
-        if close < lower:
+        if close < lower and self._regime_allows(1):
             self._pending_setup = _PendingSetup(1, 0)
-        elif close > upper:
+        elif close > upper and self._regime_allows(-1):
             self._pending_setup = _PendingSetup(-1, 0)
+
+    def _regime_allows(self, side: int) -> bool:
+        if self._regime_bar_type is None:
+            return True
+        return self._regime_side == side
+
+    def _liquidate(self) -> None:
+        if self._exit_requested or self._signed_qty == 0:
+            return
+        self._exit_requested = True
+        self._pending_setup = None
+        self.cancel_all_orders(self.config.instrument_id)
+        self.close_all_positions(self.config.instrument_id)
+
+    def _update_exits(self, *, high: float, low: float, atr: float) -> None:
+        if self._entry_side is None:
+            return
+        self._bars_held += 1
+        if (
+            self.config.time_stop_bars is not None
+            and self._bars_held >= self.config.time_stop_bars
+        ):
+            self._liquidate()
+            return
+        if self.config.chandelier_k is None or self._stop_trigger is None:
+            return
+        # ponytail: 4H ATR when regime is on, else 30m ATR — no standalone 4H feed
+        trail_atr = atr
+        if self._regime_atr is not None and self._regime_atr.initialized:
+            trail_atr = float(self._regime_atr.value)
+        self._trail.append(high if self._entry_side == 1 else low)
+        if self._entry_side == 1:
+            line = max(self._trail) - self.config.chandelier_k * trail_atr
+            if line > self._stop_trigger:
+                self._modify_stop(line)
+        else:
+            line = min(self._trail) + self.config.chandelier_k * trail_atr
+            if line < self._stop_trigger:
+                self._modify_stop(line)
+
+    def _modify_stop(self, value: float) -> None:
+        instrument = self._instrument()
+        if instrument is None or self._stop_order is None:
+            return
+        trigger = instrument.make_price(Decimal(str(value)))
+        if trigger == 0:
+            return
+        self._stop_trigger = value
+        self.modify_order(self._stop_order, trigger_price=trigger)
 
     def on_order_filled(self, event: OrderFilled) -> None:
         if event.instrument_id != self.config.instrument_id:
@@ -285,6 +416,8 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
         self._entry_filled_notional = Decimal("0")
         self._entry_fill_counted = False
         self._entry_side = side
+        self._bars_held = 0
+        self._trail.clear()
         self.submit_order(order)
 
     def _submit_bracket(self, *, fill_price: float, quantity: Decimal, side: int) -> None:
@@ -307,6 +440,7 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
         stop_value = fill_price - self.config.atr_mult * self._captured_atr
         if side == -1:
             stop_value = fill_price + self.config.atr_mult * self._captured_atr
+        self._stop_trigger = stop_value
         stop = instrument.make_price(Decimal(str(stop_value)))
         limit = instrument.make_price(Decimal(str(target)))
         quantity = instrument.make_qty(quantity)
@@ -374,6 +508,10 @@ class VolumeReentryMeanReversion(NavFractionMixin, Strategy):
         self._target_order = None
         self._stop_order_id = None
         self._target_order_id = None
+        self._stop_trigger = None
+        self._bars_held = 0
+        self._trail.clear()
+        self._exit_requested = False
         self._pending_setup = None
         self._force_flat_close_pending = False
         self._late_fill_close_requested = False

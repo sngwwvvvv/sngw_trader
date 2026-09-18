@@ -200,6 +200,7 @@ def run(
             "round_trips": len(fills_report) // 2,
             "funding": funding,
             "net": total - funding,
+            "trade_pnls": result.trade_pnls,
             **metrics,
         }
     finally:
